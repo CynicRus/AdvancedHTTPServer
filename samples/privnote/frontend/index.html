@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>PrivNote</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: sans-serif; max-width: 600px; margin: 40px auto; padding: 0 20px; }
+    textarea { width: 100%; height: 150px; padding: 10px; margin: 10px 0; }
+    input, button, select { padding: 10px; margin: 5px 0; width: 100%; box-sizing: border-box; }
+    .result { background: #eef; padding: 15px; margin: 20px 0; word-break: break-all; }
+  </style>
+</head>
+<body>
+  <h1>PrivNote</h1>
+  <p>Send notes that self-destruct after being read.</p>
+
+  <textarea id="noteText" placeholder="Enter your secret note..."></textarea>
+  <input type="password" id="password" placeholder="Optional password (for extra security)">
+
+  <select id="expire">
+    <option value="300">5 minutes</option>
+    <option value="1800">30 minutes</option>
+    <option value="3600" selected>1 hour</option>
+    <option value="14400">4 hours</option>
+    <option value="86400">24 hours</option>
+  </select>
+
+  <button type="button" onclick="create()">Create Note</button>
+
+  <div id="result" class="result" style="display:none;"></div>
+
+  <script>
+    async function encryptNote(text, password = null) {
+      const encoder = new TextEncoder();
+      const data = encoder.encode(JSON.stringify({
+        text,
+        createdAt: new Date().toISOString()
+      }));
+
+      let key;
+      if (password) {
+        const salt = crypto.getRandomValues(new Uint8Array(16));
+        const keyMaterial = await crypto.subtle.importKey(
+          "raw",
+          new TextEncoder().encode(password),
+          "PBKDF2",
+          false,
+          ["deriveKey"]
+        );
+        key = await crypto.subtle.deriveKey(
+          { name: "PBKDF2", salt, iterations: 100000, hash: "SHA-256" },
+          keyMaterial,
+          { name: "AES-GCM", length: 256 },
+          true,
+          ["encrypt"]
+        );
+        return {
+          data: await encryptWithKey(data, key),
+          salt: Array.from(salt)
+        };
+      } else {
+        key = await crypto.subtle.generateKey(
+          { name: "AES-GCM", length: 256 },
+          true,
+          ["encrypt"]
+        );
+        return {
+          data: await encryptWithKey(data, key),
+          key: await exportKeyForURL(key)
+        };
+      }
+    }
+
+    async function encryptWithKey(data, key) {
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, data);
+      const result = new Uint8Array(iv.length + encrypted.byteLength);
+      result.set(iv, 0);
+      result.set(new Uint8Array(encrypted), iv.length);
+      return btoa(String.fromCharCode(...result));
+    }
+
+    async function exportKeyForURL(key) {
+      const raw = await crypto.subtle.exportKey("raw", key);
+      return btoa(String.fromCharCode(...new Uint8Array(raw)));
+    }
+
+    async function create() {
+      const text = document.getElementById('noteText').value.trim();
+      const password = document.getElementById('password').value;
+      const expire = parseInt(document.getElementById('expire').value, 10);
+
+      if (!text) return;
+
+      try {
+        const enc = await encryptNote(text, password || null);
+
+        const res = await fetch('/api/note', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ data: enc.data, expire })
+        });
+
+        if (!res.ok) {
+          const msg = await res.text().catch(() => '');
+          throw new Error(`HTTP ${res.status} ${res.statusText}${msg ? `: ${msg}` : ''}`);
+        }
+
+        const result = await res.json();
+
+        let url = window.location.origin + '/n/' + result.id;
+        if (enc.key) {
+          url += '#key=' + encodeURIComponent(enc.key);
+        } else if (enc.salt) {
+          url += '#salt=' + btoa(String.fromCharCode(...new Uint8Array(enc.salt)));
+        }
+
+        const resultEl = document.getElementById('result');
+        resultEl.innerHTML = `
+          <p><strong>Your note is ready!</strong></p>
+          <p>Share this link (it will work only once):</p>
+          <a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a><br><br>
+          <small>If you set a password, share it separately!</small>
+        `;
+        resultEl.style.display = 'block';
+
+      } catch (e) {
+        console.error(e);
+        alert('Failed to create note. Open DevTools Console/Network for details.');
+      }
+    }
+  </script>
+</body>
+</html>

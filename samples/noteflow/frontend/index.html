@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+   <head>
+      <meta charset="UTF-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+      <title>NoteFlow</title>
+      <link rel="stylesheet" href="/style.css">
+      <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.13.10/dist/cdn.min.js"></script>
+   </head>
+   <body>
+      <div x-data="noteApp()" x-init="checkAuth()">
+         <!-- Login/Register -->
+         <template x-if="!authenticated">
+            <div class="auth-box">
+               <h2 x-text="authMode === 'login' ? 'Login' : 'Register'"></h2>
+               <input x-model="authForm.username" type="text" placeholder="Username" />
+               <input x-model="authForm.password" type="password" placeholder="Password" />
+               <button @click="submitAuth" x-text="authMode === 'login' ? 'Login' : 'Register'"></button>
+               <p>
+                  <a
+                     href="#"
+                     @click.prevent="authMode = authMode === 'login' ? 'register' : 'login'"
+                     x-text="authMode === 'login' ? 'Need an account?' : 'Already have one?'"
+                     ></a>
+               </p>
+            </div>
+         </template>
+         <!-- Notes App -->
+         <template x-if="authenticated">
+            <div class="app">
+               <header>
+                  <h1>NoteFlow</h1>
+                  <button @click="logout">Logout</button>
+               </header>
+               <div class="editor">
+                  <input x-model="newNote.title" type="text" placeholder="Title..." />
+                  <textarea x-model="newNote.content" placeholder="Content..."></textarea>
+                  <button @click="saveNote">Save Note</button>
+               </div>
+               <div class="notes-list">
+                  <template x-if="Array.isArray(notes) && notes.length === 0">
+                     <p>No notes yet</p>
+                  </template>
+                  <template x-if="!Array.isArray(notes)">
+                     <pre class="error" x-text="'Bad response from /api/notes. Expected array, got: ' + typeof notes"></pre>
+                  </template>
+                  <template x-for="note in notes" :key="note.id">
+                     <div class="note-item">
+                        <h3 x-text="note.title || '(no title)'"></h3>
+                        <p x-text="(note.content || '').length > 100
+                           ? (note.content || '').slice(0, 100) + '...'
+                           : (note.content || '')">
+                        </p>
+                        <small x-text="note.createdAt ? ('Created: ' + note.createdAt) : ''"></small>
+                        <div class="note-actions">
+                           <button type="button" @click="editNote(note)">Edit</button>
+                           <button type="button" @click="deleteNote(note.id)">Delete</button>
+                        </div>
+                     </div>
+                  </template>
+               </div>
+            </div>
+         </template>
+      </div>
+      <script>
+         function noteApp() {
+           return {
+             authenticated: false,
+             authMode: 'login',
+             authForm: { username: '', password: '' },
+             notes: [],
+             newNote: { title: '', content: '' },       
+         
+             async submitAuth() {
+               const url = this.authMode === 'login' ? '/api/auth' : '/api/register';
+               const method = 'POST';
+               const body = JSON.stringify(this.authForm);
+         
+               const res = await fetch(url, { method, body, headers: { 'Content-Type': 'application/json' } });
+               if (res.ok) {
+                 this.authenticated = true;
+                 this.loadNotes();
+               } else {
+                 alert('Error: ' + (await res.json()).error);
+               }
+             },
+         
+             async logout() {
+               await fetch('/api/auth', { method: 'DELETE' });
+               this.authenticated = false;
+               this.notes = [];
+             },
+         
+         async loadNotes() {
+         const res = await fetch('/api/notes');
+         const text = await res.text();
+         
+         let data;
+         try { data = JSON.parse(text); }
+         catch { data = text; }
+         
+         this.notes = data;
+         }
+         ,
+         async checkAuth() {
+         try {
+         const res = await fetch('/api/notes');
+         if (!res.ok) { this.authenticated = false; return; }
+         
+         const text = await res.text();
+         let data;
+         try { data = JSON.parse(text); }
+         catch { data = text; }
+         
+         if (Array.isArray(data)) {
+         this.notes = data;
+         this.authenticated = true;
+         } else {
+         
+         this.notes = data;
+         this.authenticated = true; 
+         }
+         } catch {
+         this.authenticated = false;
+         }
+         },
+         
+             async saveNote() {
+               if (!this.newNote.title.trim()) return;
+               const method = this.newNote.id ? 'PUT' : 'POST';
+               const url = this.newNote.id ? `/api/notes?id=${this.newNote.id}` : '/api/notes';
+               const body = JSON.stringify(this.newNote);
+         
+               await fetch(url, { method, body, headers: { 'Content-Type': 'application/json' } });
+               this.newNote = { title: '', content: '' };
+               this.loadNotes();
+             },
+         
+             editNote(note) {
+               this.newNote = { ...note };
+             },
+         
+             async deleteNote(id) {
+               if (confirm('Delete note?')) {
+                 await fetch(`/api/notes?id=${id}`, { method: 'DELETE' });
+                 this.loadNotes();
+               }
+             }
+           };
+         }
+      </script>
+   </body>
+</html>

@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>PrivNote — View</title>
+  <style>
+    body { font-family: sans-serif; max-width: 600px; margin: 40px auto; padding: 0 20px; }
+    .note { background: #f9f9f9; padding: 20px; margin: 20px 0; white-space: pre-wrap; }
+    .error { color: red; }
+    #password-input { display: none; margin: 20px 0; }
+  </style>
+</head>
+<body>
+  <h1>PrivNote</h1>
+  <div id="loading">Loading...</div>
+  <div id="error" class="error" style="display:none;"></div>
+  <div id="note" class="note" style="display:none;"></div>
+  <div id="password-input">
+    <input type="password" id="decryptPassword" placeholder="Enter password">
+    <button onclick="decryptWithPassword()">Decrypt</button>
+  </div>
+
+  <script>
+    async function decryptNote(encryptedB64, keyB64 = null, saltB64 = null, password = null) {
+      const encrypted = Uint8Array.from(atob(encryptedB64), c => c.charCodeAt(0));
+      const iv = encrypted.slice(0, 12);
+      const ciphertext = encrypted.slice(12);
+
+      let key;
+      if (keyB64) {
+        const raw = Uint8Array.from(atob(keyB64), c => c.charCodeAt(0));
+        key = await crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["decrypt"]);
+      } else if (saltB64 && password) {
+        const salt = Uint8Array.from(atob(saltB64), c => c.charCodeAt(0));
+        const keyMaterial = await crypto.subtle.importKey(
+          "raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveKey"]
+        );
+        key = await crypto.subtle.deriveKey(
+          { name: "PBKDF2", salt, iterations: 100000, hash: "SHA-256" },
+          keyMaterial,
+          { name: "AES-GCM", length: 256 },
+          false,
+          ["decrypt"]
+        );
+      } else {
+        throw new Error('Need key or password+salt');
+      }
+
+      const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
+      const decoder = new TextDecoder();
+      return JSON.parse(decoder.decode(decrypted)).text;
+    }
+
+    async function load() {
+      const id = window.location.pathname.split('/').pop();
+      const hash = window.location.hash.substring(1);
+      const params = new URLSearchParams(hash);
+      const key = params.get('key');
+      const salt = params.get('salt');
+
+      try {
+        const res = await fetch('/api/n/' + encodeURIComponent(id));
+        if (!res.ok) throw new Error('Note not found or already read');
+        const data = await res.json();
+
+        if (key) {
+          const text = await decryptNote(data.data, key);
+          document.getElementById('note').textContent = text;
+          document.getElementById('note').style.display = 'block';
+        } else if (salt) {
+          document.getElementById('password-input').style.display = 'block';
+          window._encrypted = data.data;
+          window._salt = salt;
+        } else {
+          throw new Error('No decryption key provided');
+        }
+      } catch (e) {
+        document.getElementById('loading').style.display = 'none';
+        document.getElementById('error').textContent = e.message;
+        document.getElementById('error').style.display = 'block';
+      }
+      document.getElementById('loading').style.display = 'none';
+    }
+
+    async function decryptWithPassword() {
+      try {
+        const password = document.getElementById('decryptPassword').value;
+        const text = await decryptNote(window._encrypted, null, window._salt, password);
+        document.getElementById('note').textContent = text;
+        document.getElementById('note').style.display = 'block';
+        document.getElementById('password-input').style.display = 'none';
+      } catch (e) {
+        alert('Wrong password!');
+      }
+    }
+
+    load();
+  </script>
+</body>
+</html>

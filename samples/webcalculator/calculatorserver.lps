@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CONFIG>
+  <ProjectSession>
+    <PathDelim Value="\"/>
+    <Version Value="12"/>
+    <BuildModes Active="Default"/>
+    <Units>
+      <Unit>
+        <Filename Value="calculatorserver.lpr"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="CalculatorServer"/>
+        <IsVisibleTab Value="True"/>
+        <CursorPos X="33" Y="8"/>
+        <UsageCount Value="20"/>
+        <Loaded Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <IsPartOfProject Value="True"/>
+        <EditorIndex Value="-1"/>
+        <WindowIndex Value="-1"/>
+        <TopLine Value="-1"/>
+        <CursorPos X="-1" Y="-1"/>
+        <UsageCount Value="20"/>
+      </Unit>
+    </Units>
+    <JumpHistory HistoryIndex="3">
+      <Position>
+        <Filename Value="calculatorserver.lpr"/>
+        <Caret Line="46" Column="52" TopLine="30"/>
+      </Position>
+      <Position>
+        <Filename Value="calculatorserver.lpr"/>
+        <Caret Line="11" Column="47" TopLine="19"/>
+      </Position>
+      <Position>
+        <Filename Value="calculatorserver.lpr"/>
+        <Caret Line="5" Column="40"/>
+      </Position>
+      <Position>
+        <Filename Value="calculatorserver.lpr"/>
+        <Caret Line="70" TopLine="68"/>
+      </Position>
+    </JumpHistory>
+    <RunParams>
+      <FormatVersion Value="2"/>
+      <Modes ActiveMode=""/>
+    </RunParams>
+  </ProjectSession>
+</CONFIG>

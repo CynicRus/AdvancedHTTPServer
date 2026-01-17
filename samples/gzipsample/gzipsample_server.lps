@@ -1,0 +1,179 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CONFIG>
+  <ProjectSession>
+    <PathDelim Value="\"/>
+    <Version Value="12"/>
+    <BuildModes Active="Default"/>
+    <Units>
+      <Unit>
+        <Filename Value="gzipsample_server.lpr"/>
+        <IsPartOfProject Value="True"/>
+        <IsVisibleTab Value="True"/>
+        <CursorPos X="20" Y="124"/>
+        <UsageCount Value="20"/>
+        <Loaded Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="AdvancedHTTPServer"/>
+        <EditorIndex Value="3"/>
+        <TopLine Value="3603"/>
+        <CursorPos X="26" Y="3621"/>
+        <UsageCount Value="20"/>
+        <Loaded Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="C:\fpcupdeluxe\fpcsrc\packages\paszlib\src\gzio.pas"/>
+        <EditorIndex Value="-1"/>
+        <TopLine Value="1208"/>
+        <CursorPos X="19" Y="1226"/>
+        <UsageCount Value="10"/>
+      </Unit>
+      <Unit>
+        <Filename Value="C:\fpcupdeluxe\fpcsrc\packages\zlib\src\zlib.pp"/>
+        <UnitName Value="ZLib"/>
+        <EditorIndex Value="2"/>
+        <TopLine Value="1231"/>
+        <CursorPos X="5" Y="1265"/>
+        <UsageCount Value="10"/>
+        <Loaded Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="zlib1.pas"/>
+        <UnitName Value="ZLib1"/>
+        <EditorIndex Value="1"/>
+        <TopLine Value="1242"/>
+        <CursorPos X="10" Y="490"/>
+        <UsageCount Value="10"/>
+        <Loaded Value="True"/>
+      </Unit>
+    </Units>
+    <JumpHistory HistoryIndex="29">
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="77" TopLine="66"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="97" TopLine="69"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="98" TopLine="70"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="100" TopLine="72"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="59" TopLine="41"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="101" TopLine="85"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="59" TopLine="41"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="101" TopLine="85"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="201" TopLine="184"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="202" TopLine="184"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="203" TopLine="184"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="204" TopLine="192"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="205" TopLine="192"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="206" TopLine="192"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="202" TopLine="192"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="208" TopLine="192"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="209" TopLine="192"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="211" TopLine="192"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="213" TopLine="192"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="215" TopLine="196"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="216" TopLine="196"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="217" TopLine="196"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="219" TopLine="196"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="220" TopLine="196"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="221" TopLine="196"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="188" TopLine="170"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="229" TopLine="213"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="188" TopLine="170"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="222" Column="115" TopLine="213"/>
+      </Position>
+      <Position>
+        <Filename Value="gzipsample_server.lpr"/>
+        <Caret Line="313" Column="5" TopLine="279"/>
+      </Position>
+    </JumpHistory>
+    <RunParams>
+      <FormatVersion Value="2"/>
+      <Modes ActiveMode=""/>
+    </RunParams>
+  </ProjectSession>
+</CONFIG>

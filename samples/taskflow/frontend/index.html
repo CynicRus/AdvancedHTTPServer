@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>TaskFlow — Alpine.js</title>
+  <link rel="stylesheet" href="/style.css">
+  <!-- Alpine.js из CDN -->
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</head>
+<body>
+  <div x-data="taskApp()" x-init="loadTasks()">
+    <header>
+      <h1>TaskFlow</h1>
+      <p>Focus • Complete • Repeat</p>
+    </header>
+
+    <!-- Pomodoro Timer -->
+    <div class="timer-box">
+      <div class="time" x-text="formattedTime"></div>
+      <div class="mode" x-text="mode === 'work' ? 'Work' : 'Break'"></div>
+      <button @click="toggleTimer" class="btn-timer">
+        <span x-text="isRunning ? 'Pause' : 'Start'"></span>
+      </button>
+      <button @click="resetTimer" class="btn-reset">Reset</button>
+    </div>
+
+    <!-- Task Form -->
+    <form @submit.prevent="addTask" class="task-form">
+      <input x-model="newTask" type="text" placeholder="New task..." required />
+      <button type="submit">+</button>
+    </form>
+
+    <!-- Task List -->
+    <ul class="task-list">
+      <template x-for="task in tasks" :key="task.id">
+        <li class="task-item">
+          <label>
+            <input type="checkbox" 
+                   :checked="task.completed" 
+                   @change="toggleTask(task.id)">
+            <span :class="{ completed: task.completed }" x-text="task.title"></span>
+          </label>
+          <button @click="deleteTask(task.id)" class="delete-btn">×</button>
+        </li>
+      </template>
+    </ul>
+
+    <footer x-show="tasks.length === 0">
+      No tasks yet. Add your first one!
+    </footer>
+  </div>
+
+  <script>
+    function taskApp() {
+      return {
+        tasks: [],
+        newTask: '',
+        isRunning: false,
+        mode: 'work', // 'work' or 'break'
+        timeLeft: 25 * 60, // seconds
+        timerInterval: null,
+
+        get formattedTime() {
+          const mins = Math.floor(this.timeLeft / 60).toString().padStart(2, '0');
+          const secs = (this.timeLeft % 60).toString().padStart(2, '0');
+          return `${mins}:${secs}`;
+        },
+
+        toggleTimer() {
+          if (this.isRunning) {
+            clearInterval(this.timerInterval);
+            this.isRunning = false;
+          } else {
+            this.isRunning = true;
+            this.timerInterval = setInterval(() => {
+              if (this.timeLeft > 0) {
+                this.timeLeft--;
+              } else {
+                clearInterval(this.timerInterval);
+                this.isRunning = false;
+                // Switch mode
+                if (this.mode === 'work') {
+                  this.mode = 'break';
+                  this.timeLeft = 5 * 60;
+                } else {
+                  this.mode = 'work';
+                  this.timeLeft = 25 * 60;
+                }
+                alert(`Time for ${this.mode}!`);
+              }
+            }, 1000);
+          }
+        },
+
+        resetTimer() {
+          clearInterval(this.timerInterval);
+          this.isRunning = false;
+          this.mode = 'work';
+          this.timeLeft = 25 * 60;
+        },
+
+        async loadTasks() {
+          const res = await fetch('/api/tasks');
+          this.tasks = await res.json();
+        },
+
+        async addTask() {
+          await fetch('/api/tasks', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title: this.newTask })
+          });
+          this.newTask = '';
+          this.loadTasks();
+        },
+
+        async toggleTask(id) {
+          const task = this.tasks.find(t => t.id === id);
+          task.completed = !task.completed;
+          await fetch(`/api/tasks?id=${id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ completed: task.completed })
+          });
+        },
+
+        async deleteTask(id) {
+          await fetch(`/api/tasks?id=${id}`, { method: 'DELETE' });
+          this.loadTasks();
+        }
+      };
+    }
+  </script>
+</body>
+</html>

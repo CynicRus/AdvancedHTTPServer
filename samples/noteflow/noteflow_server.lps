@@ -1,0 +1,170 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CONFIG>
+  <ProjectSession>
+    <PathDelim Value="\"/>
+    <Version Value="12"/>
+    <BuildModes Active="Default"/>
+    <Units>
+      <Unit>
+        <Filename Value="noteflow_server.lpr"/>
+        <IsPartOfProject Value="True"/>
+        <IsVisibleTab Value="True"/>
+        <TopLine Value="611"/>
+        <CursorPos X="40" Y="616"/>
+        <UsageCount Value="20"/>
+        <Loaded Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="..\..\src\AdvancedHTTPServer.pas"/>
+        <IsPartOfProject Value="True"/>
+        <EditorIndex Value="2"/>
+        <TopLine Value="4121"/>
+        <CursorPos X="73" Y="4134"/>
+        <UsageCount Value="20"/>
+        <Loaded Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="..\..\src\patched_openssl.pas"/>
+        <EditorIndex Value="3"/>
+        <TopLine Value="1313"/>
+        <CursorPos X="26" Y="1329"/>
+        <UsageCount Value="10"/>
+        <Loaded Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="..\..\..\Pascal\fpcupdeluxe\fpcsrc\rtl\objpas\sysutils\sysstrh.inc"/>
+        <EditorIndex Value="1"/>
+        <TopLine Value="138"/>
+        <CursorPos X="10" Y="155"/>
+        <UsageCount Value="10"/>
+        <Loaded Value="True"/>
+      </Unit>
+    </Units>
+    <JumpHistory HistoryIndex="29">
+      <Position>
+        <Filename Value="noteflow_server.lpr"/>
+        <Caret Line="32" Column="16" TopLine="14"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\patched_openssl.pas"/>
+        <Caret Line="1329" Column="26" TopLine="1313"/>
+      </Position>
+      <Position>
+        <Filename Value="noteflow_server.lpr"/>
+        <Caret Line="37" Column="10" TopLine="41"/>
+      </Position>
+      <Position>
+        <Filename Value="noteflow_server.lpr"/>
+        <Caret Line="34" Column="36" TopLine="17"/>
+      </Position>
+      <Position>
+        <Filename Value="noteflow_server.lpr"/>
+        <Caret Line="109" Column="14" TopLine="92"/>
+      </Position>
+      <Position>
+        <Filename Value="noteflow_server.lpr"/>
+        <Caret Line="135" Column="14" TopLine="118"/>
+      </Position>
+      <Position>
+        <Filename Value="noteflow_server.lpr"/>
+        <Caret Line="163" Column="14" TopLine="146"/>
+      </Position>
+      <Position>
+        <Filename Value="noteflow_server.lpr"/>
+        <Caret Line="183" Column="14" TopLine="166"/>
+      </Position>
+      <Position>
+        <Filename Value="noteflow_server.lpr"/>
+        <Caret Line="202" Column="64" TopLine="185"/>
+      </Position>
+      <Position>
+        <Filename Value="noteflow_server.lpr"/>
+        <Caret Line="222" Column="14" TopLine="205"/>
+      </Position>
+      <Position>
+        <Filename Value="noteflow_server.lpr"/>
+        <Caret Line="286" Column="24" TopLine="270"/>
+      </Position>
+      <Position>
+        <Filename Value="noteflow_server.lpr"/>
+        <Caret Line="149" Column="54" TopLine="141"/>
+      </Position>
+      <Position>
+        <Filename Value="noteflow_server.lpr"/>
+        <Caret Line="523" Column="43" TopLine="511"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPServer.pas"/>
+        <Caret Line="321" Column="3" TopLine="304"/>
+      </Position>
+      <Position>
+        <Filename Value="noteflow_server.lpr"/>
+        <Caret Line="523" Column="43" TopLine="511"/>
+      </Position>
+      <Position>
+        <Filename Value="noteflow_server.lpr"/>
+        <Caret Line="621" Column="25" TopLine="611"/>
+      </Position>
+      <Position>
+        <Filename Value="noteflow_server.lpr"/>
+        <Caret Line="57" Column="19" TopLine="40"/>
+      </Position>
+      <Position>
+        <Filename Value="noteflow_server.lpr"/>
+        <Caret Line="303" Column="83" TopLine="272"/>
+      </Position>
+      <Position>
+        <Filename Value="noteflow_server.lpr"/>
+        <Caret Line="279" TopLine="273"/>
+      </Position>
+      <Position>
+        <Filename Value="noteflow_server.lpr"/>
+        <Caret Line="280" TopLine="273"/>
+      </Position>
+      <Position>
+        <Filename Value="noteflow_server.lpr"/>
+        <Caret Line="283" TopLine="273"/>
+      </Position>
+      <Position>
+        <Filename Value="noteflow_server.lpr"/>
+        <Caret Line="285" TopLine="273"/>
+      </Position>
+      <Position>
+        <Filename Value="noteflow_server.lpr"/>
+        <Caret Line="279" Column="15" TopLine="262"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\..\Pascal\fpcupdeluxe\fpcsrc\rtl\objpas\sysutils\sysstrh.inc"/>
+        <Caret Line="155" Column="10" TopLine="138"/>
+      </Position>
+      <Position>
+        <Filename Value="noteflow_server.lpr"/>
+        <Caret Line="279" TopLine="262"/>
+      </Position>
+      <Position>
+        <Filename Value="noteflow_server.lpr"/>
+        <Caret Line="280" TopLine="262"/>
+      </Position>
+      <Position>
+        <Filename Value="noteflow_server.lpr"/>
+        <Caret Line="283" TopLine="262"/>
+      </Position>
+      <Position>
+        <Filename Value="noteflow_server.lpr"/>
+        <Caret Line="285" TopLine="262"/>
+      </Position>
+      <Position>
+        <Filename Value="noteflow_server.lpr"/>
+        <Caret Line="194" Column="36" TopLine="186"/>
+      </Position>
+      <Position>
+        <Filename Value="noteflow_server.lpr"/>
+        <Caret Line="619" Column="37" TopLine="611"/>
+      </Position>
+    </JumpHistory>
+    <RunParams>
+      <FormatVersion Value="2"/>
+      <Modes ActiveMode=""/>
+    </RunParams>
+  </ProjectSession>
+</CONFIG>

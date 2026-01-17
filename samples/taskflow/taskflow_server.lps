@@ -1,0 +1,185 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CONFIG>
+  <ProjectSession>
+    <PathDelim Value="\"/>
+    <Version Value="12"/>
+    <BuildModes Active="Default"/>
+    <Units>
+      <Unit>
+        <Filename Value="taskflow_server.lpr"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="TaskFlowServer"/>
+        <IsVisibleTab Value="True"/>
+        <TopLine Value="257"/>
+        <CursorPos X="40" Y="267"/>
+        <UsageCount Value="20"/>
+        <Loaded Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="..\..\src\AdvancedHTTPServer.pas"/>
+        <IsPartOfProject Value="True"/>
+        <EditorIndex Value="1"/>
+        <TopLine Value="3943"/>
+        <CursorPos X="32" Y="3817"/>
+        <UsageCount Value="20"/>
+        <Loaded Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="C:\fpcupdeluxe\fpcsrc\packages\sqlite\src\sqlite3dyn.pp"/>
+        <UnitName Value="SQLite3Dyn"/>
+        <EditorIndex Value="-1"/>
+        <CursorPos X="8" Y="7"/>
+        <UsageCount Value="10"/>
+      </Unit>
+      <Unit>
+        <Filename Value="C:\fpcupdeluxe\fpcsrc\packages\sqlite\src\sqlite3.inc"/>
+        <EditorIndex Value="-1"/>
+        <TopLine Value="616"/>
+        <CursorPos X="37" Y="633"/>
+        <UsageCount Value="10"/>
+      </Unit>
+      <Unit>
+        <Filename Value="C:\fpcupdeluxe\fpcsrc\packages\fcl-db\src\sqldb\sqldb.pp"/>
+        <UnitName Value="SQLDB"/>
+        <EditorIndex Value="-1"/>
+        <TopLine Value="511"/>
+        <CursorPos X="16" Y="447"/>
+        <UsageCount Value="10"/>
+      </Unit>
+      <Unit>
+        <Filename Value="C:\fpcupdeluxe\fpcsrc\packages\fcl-db\src\sqldb\sqlite\sqlite3conn.pp"/>
+        <UnitName Value="SQLite3Conn"/>
+        <EditorIndex Value="-1"/>
+        <TopLine Value="6"/>
+        <CursorPos X="39" Y="178"/>
+        <UsageCount Value="10"/>
+      </Unit>
+    </Units>
+    <JumpHistory HistoryIndex="29">
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2443" TopLine="2415"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2474" TopLine="2457"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2511" TopLine="2494"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2512" TopLine="2494"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2282" TopLine="2265"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2284" TopLine="2265"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2303" TopLine="2286"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2313" TopLine="2286"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2314" TopLine="2286"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2316" TopLine="2288"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2317" TopLine="2289"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2320" TopLine="2292"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2327" TopLine="2310"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2328" TopLine="2310"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2329" TopLine="2310"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2380" TopLine="2363"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2389" TopLine="2363"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2480" TopLine="2463"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2482" TopLine="2463"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2490" TopLine="2463"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2493" TopLine="2465"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2492" TopLine="2465"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2493" TopLine="2465"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2492" TopLine="2465"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2494" TopLine="2466"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2425" Column="46" TopLine="2415"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="3644" Column="44" TopLine="3623"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="3629" Column="21" TopLine="3623"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="3814" Column="21" TopLine="3808"/>
+      </Position>
+      <Position>
+        <Filename Value="taskflow_server.lpr"/>
+        <Caret Line="38" TopLine="375"/>
+      </Position>
+    </JumpHistory>
+    <RunParams>
+      <FormatVersion Value="2"/>
+      <Modes ActiveMode=""/>
+    </RunParams>
+  </ProjectSession>
+</CONFIG>

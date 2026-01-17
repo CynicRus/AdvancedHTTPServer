@@ -1,0 +1,165 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CONFIG>
+  <ProjectSession>
+    <PathDelim Value="\"/>
+    <Version Value="12"/>
+    <BuildModes Active="Default"/>
+    <Units>
+      <Unit>
+        <Filename Value="simple_auth.lpr"/>
+        <IsPartOfProject Value="True"/>
+        <IsVisibleTab Value="True"/>
+        <TopLine Value="203"/>
+        <CursorPos X="5" Y="257"/>
+        <UsageCount Value="67"/>
+        <Loaded Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="AdvancedHTTPServer"/>
+        <EditorIndex Value="1"/>
+        <TopLine Value="4090"/>
+        <CursorPos X="5" Y="4145"/>
+        <UsageCount Value="67"/>
+        <Loaded Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="C:\fpcupdeluxe\fpcsrc\packages\openssl\src\openssl.pas"/>
+        <EditorIndex Value="-1"/>
+        <TopLine Value="6216"/>
+        <CursorPos X="5" Y="6250"/>
+        <UsageCount Value="12"/>
+      </Unit>
+      <Unit>
+        <Filename Value="..\..\src\patched_openssl.pas"/>
+        <EditorIndex Value="2"/>
+        <TopLine Value="1151"/>
+        <CursorPos X="12" Y="1169"/>
+        <UsageCount Value="14"/>
+        <Loaded Value="True"/>
+      </Unit>
+    </Units>
+    <JumpHistory HistoryIndex="25">
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2495" TopLine="2477"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2975" Column="21" TopLine="2962"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="369" Column="21" TopLine="353"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="3588" Column="42" TopLine="3575"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="4084" Column="15" TopLine="4055"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\patched_openssl.pas"/>
+        <Caret Line="2966" TopLine="2949"/>
+      </Position>
+      <Position>
+        <Filename Value="simple_auth.lpr"/>
+        <Caret Line="251" Column="5" TopLine="223"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="3611" Column="26" TopLine="3596"/>
+      </Position>
+      <Position>
+        <Filename Value="simple_auth.lpr"/>
+        <Caret Line="252" Column="5" TopLine="223"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\patched_openssl.pas"/>
+        <Caret Line="2966" TopLine="2949"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2942" TopLine="2925"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2636" TopLine="2619"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2496" Column="50" TopLine="2477"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="4124" Column="51" TopLine="4112"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="4119" Column="36" TopLine="3919"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="348" Column="22" TopLine="338"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2497" Column="20" TopLine="2483"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\patched_openssl.pas"/>
+        <Caret Line="2015" Column="3" TopLine="1998"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\patched_openssl.pas"/>
+        <Caret Line="1699" Column="3" TopLine="1688"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\patched_openssl.pas"/>
+        <Caret Line="6236" Column="31" TopLine="5874"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\patched_openssl.pas"/>
+        <Caret Line="2007" Column="3" TopLine="1990"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\patched_openssl.pas"/>
+        <Caret Line="5760" Column="3" TopLine="5734"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2496" Column="22" TopLine="2479"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="2625" Column="29" TopLine="2611"/>
+      </Position>
+      <Position>
+        <Filename Value="simple_auth.lpr"/>
+        <Caret Line="233" Column="35" TopLine="223"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\advancedhttpserver.pas"/>
+        <Caret Line="4125" Column="32" TopLine="4115"/>
+      </Position>
+    </JumpHistory>
+    <RunParams>
+      <FormatVersion Value="2"/>
+      <Modes ActiveMode=""/>
+    </RunParams>
+  </ProjectSession>
+  <Debugging>
+    <BreakPoints>
+      <Item>
+        <Kind Value="bpkSource"/>
+        <WatchScope Value="wpsLocal"/>
+        <WatchKind Value="wpkWrite"/>
+        <Source Value="..\..\src\advancedhttpserver.pas"/>
+        <Line Value="1"/>
+      </Item>
+    </BreakPoints>
+  </Debugging>
+</CONFIG>

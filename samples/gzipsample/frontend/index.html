@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Gzip Demo</title>
+
+  <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
+
+  <script src="/gzip.js"></script>
+</head>
+<body>
+  <h1>Gzip Compression Demo</h1>
+
+  <textarea id="input" rows="5" cols="50">
+{"name":"Alice","message":"Hello from browser!"}
+  </textarea><br>
+
+  <button onclick="sendGzip()">Send Gzipped Request</button>
+  <button onclick="sendPlain()">Send Plain Request</button>
+
+  <h2>Response:</h2>
+  <pre id="output"></pre>
+
+  <script>
+    async function sendGzip() {
+      try {
+        const data = document.getElementById('input').value;
+
+        const compressedU8 = await gzip.compressToUint8(data);
+        console.log('compressed bytes:', compressedU8.byteLength);
+
+        const res = await fetch('/api/gzip', {
+          method: 'POST',
+          headers: {
+            'Content-Encoding': 'gzip',
+            'Content-Type': 'application/json'
+          },
+          body: compressedU8
+        });
+
+        const ce = (res.headers.get('content-encoding') || '').toLowerCase();
+        document.getElementById('output').textContent = await res.text();
+		
+      } catch (e) {
+        console.error(e);
+        document.getElementById('output').textContent = String(e?.stack || e);
+      }
+    }
+
+    async function sendPlain() {
+      try {
+        const data = document.getElementById('input').value;
+
+        const res = await fetch('/api/gzip', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: data
+        });
+
+        document.getElementById('output').textContent = await res.text();
+      } catch (e) {
+        console.error(e);
+        document.getElementById('output').textContent = String(e?.stack || e);
+      }
+    }
+  </script>
+</body>
+</html>

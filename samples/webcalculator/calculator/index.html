@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>FreePascal Calculator</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #f5f5f5;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .calculator {
+      width: 340px;
+      background: white;
+      border-radius: 24px;
+      box-shadow: 0 6px 24px rgba(0,0,0,0.15);
+      overflow: hidden;
+    }
+    .display {
+      padding: 24px 20px;
+      text-align: right;
+      background: #000;
+      color: white;
+    }
+    .history {
+      font-size: 16px;
+      color: #aaa;
+      min-height: 24px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .value {
+      font-size: 36px;
+      margin-top: 8px;
+      word-wrap: break-word;
+      overflow-wrap: break-word;
+    }
+    .buttons {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1px;
+      background: #d4d4d4;
+      padding: 16px;
+    }
+    button {
+      border: none;
+      background: white;
+      padding: 18px 0;
+      font-size: 18px;
+      cursor: pointer;
+      transition: background 0.15s;
+      outline: none;
+      user-select: none;
+    }
+    button:hover { background: #f0f0f0; }
+    button:active { background: #e0e0e0; }
+    .operator { background: #f9a825; color: white; }
+    .equals { 
+      background: #1976d2; 
+      color: white; 
+      grid-column: span 2; 
+    }
+    .function { background: #e0e0e0; color: black; }
+    @media (max-width: 360px) {
+      .calculator {
+        width: 100%;
+        height: 100vh;
+        border-radius: 0;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="calculator">
+    <div class="display">
+      <div class="history" id="history"></div>
+      <div class="value" id="display">0</div>
+    </div>
+    <div class="buttons">
+      <button class="function" onclick="clearAll()">C</button>
+      <button class="function" onclick="clearEntry()">CE</button>
+      <button class="function" onclick="backspace()">⌫</button>
+      <button class="operator" onclick="inputOperator('/')">÷</button>
+      
+      <button onclick="inputDigit('7')">7</button>
+      <button onclick="inputDigit('8')">8</button>
+      <button onclick="inputDigit('9')">9</button>
+      <button class="operator" onclick="inputOperator('*')">×</button>
+      
+      <button onclick="inputDigit('4')">4</button>
+      <button onclick="inputDigit('5')">5</button>
+      <button onclick="inputDigit('6')">6</button>
+      <button class="operator" onclick="inputOperator('-')">−</button>
+      
+      <button onclick="inputDigit('1')">1</button>
+      <button onclick="inputDigit('2')">2</button>
+      <button onclick="inputDigit('3')">3</button>
+      <button class="operator" onclick="inputOperator('+')">+</button>
+      
+      <button onclick="toggleSign()">±</button>
+      <button onclick="inputDigit('0')">0</button>
+      <button onclick="inputDecimal()">.</button>
+      <button class="equals" onclick="calculate()">=</button>
+      
+      <button class="function" onclick="inputFunction('sqrt')">√</button>
+      <button class="function" onclick="inputFunction('percent')">%</button>
+      <button class="function" onclick="inputFunction('inverse')">1/x</button>
+    </div>
+  </div>
+
+  <script>
+    let currentValue = "0";
+    let previousValue = null;
+    let operator = null;
+    let resetOnNextInput = false;
+    let history = [];
+    const MAX_HISTORY = 10;
+
+    function updateDisplay() {
+      document.getElementById("display").textContent = formatNumber(currentValue);
+      updateHistory();
+    }
+
+    function updateHistory() {
+      const histEl = document.getElementById("history");
+      if (history.length === 0) {
+        histEl.textContent = "";
+        return;
+      }
+      const last = history[history.length - 1];
+      histEl.textContent = last;
+    }
+
+    function formatNumber(num) {
+      const n = parseFloat(num);
+      if (isNaN(n)) return "Error";
+      if (!isFinite(n)) return "∞";
+      return parseFloat(n.toFixed(12)).toString();
+    }
+
+    function inputDigit(digit) {
+      if (resetOnNextInput) {
+        currentValue = "0";
+        resetOnNextInput = false;
+      }
+      if (currentValue === "0" && digit !== ".") {
+        currentValue = digit;
+      } else {
+        currentValue += digit;
+      }
+      updateDisplay();
+    }
+
+    function inputDecimal() {
+      if (resetOnNextInput) {
+        currentValue = "0";
+        resetOnNextInput = false;
+      }
+      if (!currentValue.includes(".")) {
+        currentValue += ".";
+      }
+      updateDisplay();
+    }
+
+    function clearAll() {
+      currentValue = "0";
+      previousValue = null;
+      operator = null;
+      history = [];
+      updateDisplay();
+    }
+
+    function clearEntry() {
+      currentValue = "0";
+      updateDisplay();
+    }
+
+    function backspace() {
+      if (currentValue.length > 1) {
+        currentValue = currentValue.slice(0, -1);
+      } else {
+        currentValue = "0";
+      }
+      updateDisplay();
+    }
+
+    function toggleSign() {
+      currentValue = (parseFloat(currentValue) * -1).toString();
+      updateDisplay();
+    }
+
+    function inputOperator(op) {
+      const current = parseFloat(currentValue);
+      if (previousValue === null) {
+        previousValue = current;
+      } else if (operator) {
+        const result = performCalculation();
+        if (result === null) return;
+        previousValue = result;
+        currentValue = result.toString();
+      }
+      operator = op;
+      resetOnNextInput = true;
+    }
+
+    function inputFunction(func) {
+      const val = parseFloat(currentValue);
+      let result;
+      switch(func) {
+        case "sqrt":
+          if (val < 0) { currentValue = "Error"; break; }
+          result = Math.sqrt(val); break;
+        case "percent":
+          result = val / 100; break;
+        case "inverse":
+          if (val === 0) { currentValue = "Error"; break; }
+          result = 1 / val; break;
+        default: return;
+      }
+      if (result !== undefined) {
+        currentValue = result.toString();
+        updateDisplay();
+      }
+    }
+
+    function performCalculation() {
+      const prev = parseFloat(previousValue);
+      const current = parseFloat(currentValue);
+      if (isNaN(prev) || isNaN(current)) return null;
+
+      let result;
+      switch(operator) {
+        case "+": result = prev + current; break;
+        case "-": result = prev - current; break;
+        case "*": result = prev * current; break;
+        case "/":
+          if (current === 0) { currentValue = "Error"; return null; }
+          result = prev / current; break;
+        default: return null;
+      }
+
+      const expr = `${formatNumber(previousValue)} ${operator} ${formatNumber(currentValue)} = ${formatNumber(result)}`;
+      history.push(expr);
+      if (history.length > MAX_HISTORY) history.shift();
+
+      return result;
+    }
+
+    function calculate() {
+      if (operator === null || previousValue === null) return;
+      const result = performCalculation();
+      if (result === null) return;
+      currentValue = result.toString();
+      previousValue = null;
+      operator = null;
+      resetOnNextInput = true;
+      updateDisplay();
+    }
+
+    // Keyboard support
+    document.addEventListener("keydown", (e) => {
+      e.preventDefault();
+      if (/^[0-9]$/.test(e.key)) inputDigit(e.key);
+      else if (e.key === ".") inputDecimal();
+      else if (["+", "-", "*", "/"].includes(e.key)) inputOperator(e.key);
+      else if (e.key === "Enter" || e.key === "=") calculate();
+      else if (e.key === "Escape") clearAll();
+      else if (e.key === "Backspace") backspace();
+      else if (e.key === "%") inputFunction("percent");
+    });
+
+    updateDisplay();
+  </script>
+</body>
+</html>
