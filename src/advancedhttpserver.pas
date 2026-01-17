@@ -87,6 +87,25 @@ function epoll_ctl(epfd: Integer; op: Integer; fd: Integer; event: Pointer): Int
 function epoll_wait(epfd: Integer; events: Pointer; maxevents: Integer; timeout: Integer): Integer; cdecl; external 'c' name 'epoll_wait';
   {$ENDIF}
 
+  {$IFDEF WINDOWS}
+  type
+  ADDRESS_FAMILY = Word;
+
+  const
+  _SS_PAD1SIZE = 6;
+  _SS_PAD2SIZE = 112;
+
+  type
+  sockaddr_storage  = packed record
+    ss_family  : ADDRESS_FAMILY;
+    __ss_pad1  : array[0.._SS_PAD1SIZE-1] of Char;
+    __ss_align : Int64;
+    __ss_pad2  : array[0.._SS_PAD2SIZE-1] of Char;
+  end;
+  PSockAddrStorageLH = ^sockaddr_storage ;
+  LPSockAddrStorageLH = PSockAddrStorageLH;
+  {$ENDIF}
+
   // SSL error codes
 const
   SSL_ERROR_NONE = 0;
@@ -448,6 +467,11 @@ type
     public
       constructor Create(AServer: THTTPServer);
     end;
+
+  function getnameinfo(sa: PSockAddr; salen: Integer;
+      host: PAnsiChar; hostlen: DWORD;
+      serv: PAnsiChar; servlen: DWORD;
+      flags: Integer): Integer; stdcall; external 'Ws2_32.dll' name 'getnameinfo';
 {$ENDIF}
 
 function FileServer(const Root: string): THandlerFunc;
@@ -572,6 +596,16 @@ begin
     ErrCode := ERRGetError();
   end;
 end;
+
+{$IFDEF MSWINDOWS}
+function StrToNetAddrWin(const IP: AnsiString): in_addr;
+var
+  a: in_addr;
+begin
+  a.S_addr := inet_addr(PAnsiChar(IP));
+  Result := a;
+end;
+{$ENDIF}
 
 {$IFDEF ENABLE_HTTP2}
 // ALPN Callback
@@ -980,6 +1014,111 @@ begin
   else
     Result := Conn = 'keep-alive';
 end;
+
+function ParseAddress(const Addr: string; out Host: string; out Port: Word): Boolean;
+  function StrToWordDef(const S: string; Default: Word): Word;
+  var
+    V: LongInt;
+    E: Integer;
+  begin
+    if S = '' then
+      Exit(Default);
+
+    Val(S, V, E);
+
+    if E <> 0 then
+      Exit(Default);
+
+
+    if (V < Low(Word)) or (V > High(Word)) then
+      Exit(Default);
+
+    Result := Word(V);
+  end;
+var
+  P: Integer;
+begin
+  Result := False;
+  Host := '';
+  Port := 0;
+  if Addr = '' then Exit;
+
+  // We check IPv6 in the format [::1]:8080
+  if (Length(Addr) > 2) and (Addr[1] = '[') then
+  begin
+    P := Pos(']:', Addr);
+    if P = 0 then Exit;
+    Host := Copy(Addr, 2, P - 2);
+    Port := StrToWordDef(Copy(Addr, P + 2, MaxInt), 0);
+    if Port = 0 then Exit;
+    Result := True;
+  end
+  else
+  begin
+    // Regular IPv4 or hostname:port
+    P := LastDelimiter(':', Addr);
+    if P = 0 then Exit;
+    Host := Copy(Addr, 1, P - 1);
+    Port := StrToWordDef(Copy(Addr, P + 1, MaxInt), 0);
+    if Port = 0 then Exit;
+    Result := True;
+  end;
+end;
+
+
+
+function SockAddrStorageToStr(const SS: sockaddr_storage): string;
+const
+  NI_MAXHOST = 1025;
+  NI_MAXSERV = 32;
+  NI_NUMERICHOST = $02;
+  NI_NUMERICSERV = $08;
+var
+  HostBuf: array[0..NI_MAXHOST - 1] of AnsiChar;
+  ServBuf: array[0..NI_MAXSERV - 1] of AnsiChar;
+  R: Integer;
+  Host, Serv: string;
+  SA: PSockAddr;
+  SALen: TSockLen;
+begin
+  FillChar(HostBuf, SizeOf(HostBuf), 0);
+  FillChar(ServBuf, SizeOf(ServBuf), 0);
+
+  SA := PSockAddr(@SS);
+  case SS.ss_family of
+    AF_INET:  SALen := SizeOf(sockaddr_in);
+    AF_INET6: SALen := SizeOf(sockaddr_in6);
+  else
+    Exit('unknown');
+  end;
+
+  {$IFDEF MSWINDOWS}
+  // WinSock2 getnameinfo returns 0 on success, otherwise WSA error code
+  R := getnameinfo(SA, SALen,
+                   @HostBuf[0], NI_MAXHOST,
+                   @ServBuf[0], NI_MAXSERV,
+                   NI_NUMERICHOST or NI_NUMERICSERV);
+  if R <> 0 then
+    Exit('unknown');
+  {$ELSE}
+  // On Linux/BSD getnameinfo returns 0 on success, otherwise EAI_* code
+  R := fpgetnameinfo(SA, SALen,
+                     @HostBuf[0], NI_MAXHOST,
+                     @ServBuf[0], NI_MAXSERV,
+                     NI_NUMERICHOST or NI_NUMERICSERV);
+  if R <> 0 then
+    Exit('unknown');
+  {$ENDIF}
+
+  Host := string(PAnsiChar(@HostBuf[0]));
+  Serv := string(PAnsiChar(@ServBuf[0]));
+
+  if SS.ss_family = AF_INET6 then
+    Result := '[' + Host + ']:' + Serv
+  else
+    Result := Host + ':' + Serv;
+end;
+
 
 procedure ServeFile(W: TResponseWriter; R: TRequest; const FilePath: string);
 var
@@ -3746,21 +3885,26 @@ end;
 procedure THTTPServer.ListenAndServe(const Addr: string);
 var
   ClientSock: integer;
-  Sin, ClientAddr: TSockAddrIn;
+  Sin: TSockAddrIn;
   Sin6: sockaddr_in6;
-  Len: integer;
   Port: word;
   OptVal: integer;
   ClientAddrStr: string;
   Conn: PClientConnection;
   UseIPv6: boolean;
+  Host: string;
+
   {$IFDEF LINUX}
   Event: epoll_event;
   {$ENDIF}
+
   {$IFDEF WINDOWS}
   TV: TTimeVal;
   FDS: TFDSet;
   IOCPThread: TThread;
+
+  ClientSS: sockaddr_storage;
+  ClientLen: Integer;
   {$ENDIF}
 begin
   {$IFDEF UNIX}
@@ -3768,11 +3912,10 @@ begin
   fpSignal(SIGTERM, @HandleSignal);
   {$ENDIF}
 
-  if (Length(Addr) = 0) or (Addr[1] <> ':') then
-    raise Exception.Create('Invalid address format, use :port');
-  Port := StrToInt(Copy(Addr, 2, MaxInt));
+  if not ParseAddress(Addr, Host, Port) then
+    raise Exception.Create('Invalid address format, use host:port (IPv6: [addr]:port)');
 
-  UseIPv6 := False;
+  UseIPv6 := (Pos(':', Host) > 0) or (Pos('%', Host) > 0);
 
   {$IFDEF WINDOWS}
   if UseIPv6 then
@@ -3802,6 +3945,9 @@ begin
     Sin6.sin6_family := AF_INET6;
     Sin6.sin6_port := htons(Port);
 
+    if (Host <> '') and (Host <> '*') then
+      Sin6.sin6_addr := StrToNetAddr6(Host);
+
     {$IFDEF WINDOWS}
     if bind(TSocket(FServerSock), PSockAddr(@Sin6), SizeOf(Sin6)) = SOCKET_ERROR then
       raise Exception.Create('Bind failed');
@@ -3815,7 +3961,11 @@ begin
     FillChar(Sin, SizeOf(Sin), 0);
     Sin.sin_family := AF_INET;
     Sin.sin_port := htons(Port);
-    Sin.sin_addr.s_addr := INADDR_ANY;
+
+    if (Host = '') or (Host = '*') then
+      Sin.sin_addr.s_addr := INADDR_ANY
+    else
+      Sin.sin_addr := {$IFDEF MSWINDOWS}StrToNetAddrWin(Host){$ELSE}StrToNetAddr(Host){$ENDIF};
 
     {$IFDEF WINDOWS}
     if bind(TSocket(FServerSock), PSockAddr(@Sin), SizeOf(Sin)) = SOCKET_ERROR then
@@ -3834,7 +3984,10 @@ begin
     raise Exception.Create('Listen failed');
   {$ENDIF}
 
-  WriteLn('HTTP server listening on http://localhost:', Port);
+  if (Host = '') or (Host = '*') then
+    WriteLn('HTTP server listening on http://localhost:', Port)
+  else
+    WriteLn(Format('HTTP server listening on http://%s:%d', [Host, Port]));
   WriteLn('Press Ctrl+C to stop');
 
   {$IFDEF LINUX}
@@ -3854,13 +4007,11 @@ begin
 
   {$IFDEF WINDOWS}
   InitIOCP;
-
   IOCPThread := TIOCPLoopThread.Create(Self);
 
   try
     while not ShutdownRequested do
     begin
-
       FD_ZERO(FDS);
       _FD_SET(TSocket(FServerSock), FDS);
       TV.tv_sec := 0;
@@ -3868,13 +4019,15 @@ begin
 
       if select(0, @FDS, nil, nil, @TV) > 0 then
       begin
-        Len := SizeOf(ClientAddr);
-        ClientSock := SysAccept(FServerSock, ClientAddr, Len);
+        FillChar(ClientSS, SizeOf(ClientSS), 0);
+        ClientLen := SizeOf(ClientSS);
 
-        if ClientSock <> -1 then
+        // ВАЖНО: accept получает sockaddr* и длину именно sockaddr_storage
+        ClientSock := accept(TSocket(FServerSock), PSockAddr(@ClientSS), @ClientLen);
+
+        if ClientSock <> INVALID_SOCKET then
         begin
-          ClientAddrStr := string(inet_ntoa(ClientAddr.sin_addr)) + ':' +
-                           IntToStr(ntohs(ClientAddr.sin_port));
+          ClientAddrStr := SockAddrStorageToStr(ClientSS);
 
           New(Conn);
           Conn^.Sock := ClientSock;
@@ -3931,21 +4084,26 @@ procedure THTTPServer.ListenAndServeTLS(const Addr: string;
   const CertFile, KeyFile: string);
 var
   ClientSock: integer;
-  Sin, ClientAddr: TSockAddrIn;
+  Sin: TSockAddrIn;
   Sin6: sockaddr_in6;
-  Len: integer;
   Port: word;
   OptVal: integer;
   ClientAddrStr: string;
   Conn: PClientConnection;
   UseIPv6: boolean;
+  Host: string;
+
   {$IFDEF LINUX}
   Event: epoll_event;
   {$ENDIF}
+
   {$IFDEF WINDOWS}
   TV: TTimeVal;
   FDS: TFDSet;
   IOCPThread: TIOCPLoopThread;
+
+  ClientSS: sockaddr_storage;
+  ClientLen: Integer;
   {$ENDIF}
 begin
   {$IFDEF UNIX}
@@ -3960,11 +4118,10 @@ begin
   if not InitSSL then
     raise Exception.Create('Failed to initialize SSL');
 
-  if (Length(Addr) = 0) or (Addr[1] <> ':') then
-    raise Exception.Create('Invalid address format, use :port');
-  Port := StrToInt(Copy(Addr, 2, MaxInt));
+  if not ParseAddress(Addr, Host, Port) then
+    raise Exception.Create('Invalid address format, use host:port (IPv6: [addr]:port)');
 
-  UseIPv6 := False;
+  UseIPv6 := (Pos(':', Host) > 0) or (Pos('%', Host) > 0);
 
   {$IFDEF WINDOWS}
   if UseIPv6 then
@@ -3994,6 +4151,9 @@ begin
     Sin6.sin6_family := AF_INET6;
     Sin6.sin6_port := htons(Port);
 
+    if (Host <> '') and (Host <> '*') then
+      Sin6.sin6_addr := StrToNetAddr6(Host);
+
     {$IFDEF WINDOWS}
     if bind(TSocket(FServerSock), PSockAddr(@Sin6), SizeOf(Sin6)) = SOCKET_ERROR then
       raise Exception.Create('Bind failed');
@@ -4007,7 +4167,11 @@ begin
     FillChar(Sin, SizeOf(Sin), 0);
     Sin.sin_family := AF_INET;
     Sin.sin_port := htons(Port);
-    Sin.sin_addr.s_addr := INADDR_ANY;
+
+    if (Host = '') or (Host = '*') then
+      Sin.sin_addr.s_addr := INADDR_ANY
+    else
+      Sin.sin_addr := {$IFDEF MSWINDOWS}StrToNetAddrWin(Host){$ELSE}StrToNetAddr(Host){$ENDIF};
 
     {$IFDEF WINDOWS}
     if bind(TSocket(FServerSock), PSockAddr(@Sin), SizeOf(Sin)) = SOCKET_ERROR then
@@ -4026,7 +4190,10 @@ begin
     raise Exception.Create('Listen failed');
   {$ENDIF}
 
-  WriteLn('HTTPS server listening on https://localhost:', Port);
+  if Host = '' then
+    WriteLn('HTTPS server listening on https://0.0.0.0:', Port)
+  else
+    WriteLn('HTTPS server listening on https://', Host, ':', Port);
   WriteLn('Press Ctrl+C to stop');
 
   {$IFDEF LINUX}
@@ -4058,13 +4225,14 @@ begin
 
       if select(0, @FDS, nil, nil, @TV) > 0 then
       begin
-        Len := SizeOf(ClientAddr);
-        ClientSock := SysAccept(FServerSock, ClientAddr, Len);
+        FillChar(ClientSS, SizeOf(ClientSS), 0);
+        ClientLen := SizeOf(ClientSS);
 
-        if ClientSock <> -1 then
+        ClientSock := accept(TSocket(FServerSock), PSockAddr(@ClientSS), @ClientLen);
+
+        if ClientSock <> INVALID_SOCKET then
         begin
-          ClientAddrStr := string(inet_ntoa(ClientAddr.sin_addr)) + ':' +
-                           IntToStr(ntohs(ClientAddr.sin_port));
+          ClientAddrStr := SockAddrStorageToStr(ClientSS);
 
           New(Conn);
           Conn^.Sock := ClientSock;
@@ -4129,11 +4297,11 @@ begin
         end;
       end;
     end;
-    finally
-      ShutdownRequested := True;
-      IOCPThread.WaitFor;
-      IOCPThread.Free;
-     end;
+  finally
+    ShutdownRequested := True;
+    IOCPThread.WaitFor;
+    IOCPThread.Free;
+  end;
   {$ENDIF}
 
   Shutdown;
