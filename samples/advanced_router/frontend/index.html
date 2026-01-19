@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>User Manager</title>
+  <link rel="stylesheet" href="/public/style.css" />
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</head>
+<body x-data="app">
+  <h1>User Manager (Alpine.js + AdvancedHTTPServer Backend)</h1>
+
+  <!-- Form -->
+  <form @submit.prevent="saveUser">
+    <input type="hidden" x-model="editingId" />
+    <input type="text" x-model="newUser.name" placeholder="Name" required />
+    <input type="email" x-model="newUser.email" placeholder="Email" required />
+    <button type="submit" x-text="editingId ? 'Update' : 'Add'"></button>
+    <button type="button" @click="resetForm" x-show="editingId">Cancel</button>
+  </form>
+
+  <!-- Users List -->
+  <ul>
+    <template x-for="user in users" :key="user.id">
+      <li>
+        <strong x-text="user.name"></strong> — <span x-text="user.email"></span>
+        <button @click="editUser(user)">✏️</button>
+        <button @click="deleteUser(user.id)">🗑️</button>
+      </li>
+    </template>
+  </ul>
+
+  <div x-show="error" x-text="error" class="error"></div>
+  <div x-show="message" x-text="message" class="success"></div>
+
+  <script>
+    document.addEventListener('alpine:init', () => {
+      Alpine.data('app', () => ({
+        users: [],
+        newUser: { name: '', email: '' },
+        editingId: null,
+        error: '',
+        message: '',
+
+        async init() {
+          await this.loadUsers();
+        },
+
+        async loadUsers() {
+          try {
+            const res = await fetch('/api/users', {
+              headers: { 'X-API-Key': 'secret123' }
+            });
+            if (!res.ok) throw new Error(await res.text());
+            this.users = await res.json();
+            this.error = '';
+          } catch (err) {
+            this.error = 'Load failed: ' + err.message;
+          }
+        },
+
+        async saveUser() {
+          const url = this.editingId
+            ? `/api/users/${this.editingId}`
+            : '/api/users';
+          const method = this.editingId ? 'PUT' : 'POST';
+
+          try {
+            const res = await fetch(url, {
+              method,
+              headers: {
+                'Content-Type': 'application/json',
+                'X-API-Key': 'secret123'
+              },
+              body: JSON.stringify(this.newUser)
+            });
+            if (!res.ok) throw new Error(await res.text());
+
+            this.message = this.editingId ? 'Updated!' : 'Added!';
+            this.resetForm();
+            await this.loadUsers();
+            setTimeout(() => this.message = '', 3000);
+          } catch (err) {
+            this.error = 'Save failed: ' + err.message;
+          }
+        },
+
+        editUser(user) {
+          this.newUser = { ...user };
+          this.editingId = user.id;
+        },
+
+        async deleteUser(id) {
+          if (!confirm('Delete?')) return;
+          try {
+            const res = await fetch(`/api/users/${id}`, {
+              method: 'DELETE',
+              headers: { 'X-API-Key': 'secret123' }
+            });
+            if (!res.ok) throw new Error(await res.text());
+            this.message = 'Deleted!';
+            await this.loadUsers();
+            setTimeout(() => this.message = '', 3000);
+          } catch (err) {
+            this.error = 'Delete failed: ' + err.message;
+          }
+        },
+
+        resetForm() {
+          this.newUser = { name: '', email: '' };
+          this.editingId = null;
+        }
+      }));
+    });
+  </script>
+</body>
+</html>

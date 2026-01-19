@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CONFIG>
+  <ProjectSession>
+    <PathDelim Value="\"/>
+    <Version Value="12"/>
+    <BuildModes Active="Default"/>
+    <Units>
+      <Unit>
+        <Filename Value="routertestapp.lpr"/>
+        <IsPartOfProject Value="True"/>
+        <TopLine Value="343"/>
+        <CursorPos X="65" Y="352"/>
+        <UsageCount Value="20"/>
+        <Loaded Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="..\..\src\AdvancedHTTPServer.pas"/>
+        <IsPartOfProject Value="True"/>
+        <EditorIndex Value="2"/>
+        <TopLine Value="832"/>
+        <CursorPos X="20" Y="838"/>
+        <UsageCount Value="20"/>
+        <Loaded Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <IsPartOfProject Value="True"/>
+        <IsVisibleTab Value="True"/>
+        <EditorIndex Value="1"/>
+        <TopLine Value="594"/>
+        <CursorPos X="128" Y="606"/>
+        <UsageCount Value="20"/>
+        <Loaded Value="True"/>
+      </Unit>
+    </Units>
+    <JumpHistory HistoryIndex="29">
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="434" TopLine="414"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="435" TopLine="414"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="436" TopLine="414"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="437" TopLine="414"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="438" TopLine="414"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="441" TopLine="415"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="445" TopLine="437"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="455" TopLine="437"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="458" TopLine="449"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="460" TopLine="449"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="461" TopLine="449"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="462" TopLine="449"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="464" TopLine="449"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="465" TopLine="452"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="467" TopLine="452"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="468" TopLine="452"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="469" TopLine="452"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="470" TopLine="452"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="473" TopLine="458"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="474" TopLine="458"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="475" TopLine="458"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="402" TopLine="385"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="93" Column="45" TopLine="84"/>
+      </Position>
+      <Position>
+        <Filename Value="routertestapp.lpr"/>
+        <Caret Line="215" Column="52" TopLine="202"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="1002" Column="56" TopLine="991"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="960" Column="5" TopLine="928"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="92" Column="55" TopLine="76"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="94" Column="63" TopLine="76"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="351" Column="70" TopLine="335"/>
+      </Position>
+      <Position>
+        <Filename Value="..\..\src\AdvancedHTTPRouter.pas"/>
+        <Caret Line="420" Column="26" TopLine="404"/>
+      </Position>
+    </JumpHistory>
+    <RunParams>
+      <FormatVersion Value="2"/>
+      <Modes ActiveMode=""/>
+    </RunParams>
+  </ProjectSession>
+  <Debugging>
+    <BreakPoints>
+      <Item>
+        <Kind Value="bpkSource"/>
+        <WatchScope Value="wpsLocal"/>
+        <WatchKind Value="wpkWrite"/>
+        <Source Value="routertestapp.lpr"/>
+        <Line Value="117"/>
+      </Item>
+    </BreakPoints>
+  </Debugging>
+</CONFIG>
