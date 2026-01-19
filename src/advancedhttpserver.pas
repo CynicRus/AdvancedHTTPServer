@@ -50,7 +50,8 @@ uses
   JwaWinsock2,
   JwaWinBase,
   {$ENDIF}
-  SysUtils, StrUtils, Classes, FGL, DateUtils, syncobjs, patched_openssl, ctypes, contnrs, math
+  SysUtils, StrUtils, Classes, FGL, DateUtils, syncobjs, patched_openssl,
+  ctypes, contnrs, Math
   {$IFDEF ENABLE_HTTP2}
   , nghttp2
   {$ENDIF}
@@ -104,6 +105,13 @@ function epoll_wait(epfd: Integer; events: Pointer; maxevents: Integer; timeout:
   end;
   PSockAddrStorageLH = ^sockaddr_storage ;
   LPSockAddrStorageLH = PSockAddrStorageLH;
+  {$ENDIF}
+  {$IFDEF LINUX}
+  type
+  sockaddr_storage = record
+    ss_family : sa_family_t;
+  end;
+
   {$ENDIF}
 
   // SSL error codes
@@ -318,7 +326,8 @@ type
     State: TConnectionState;
     // Unified buffer for plaintext application data (HTTP)
     PlainInBuf: ansistring;
-    OutBuf: ansistring; // Used for buffering writes (encrypted data for TLS, plaintext for HTTP)
+    OutBuf: ansistring;
+    // Used for buffering writes (encrypted data for TLS, plaintext for HTTP)
     CurrentRequest: TRequest;
     CurrentWriter: TResponseWriter;
     KeepAlive: boolean;
@@ -337,7 +346,7 @@ type
     // Memory BIO (used on both Linux and Windows now)
     ReadBIO: PBIO;
     WriteBIO: PBIO;
-    HandshakeDone: Boolean;
+    HandshakeDone: boolean;
 
     {$IFDEF WINDOWS}
     // IOCP specific
@@ -476,6 +485,12 @@ type
 
 function FileServer(const Root: string): THandlerFunc;
 procedure ServeFile(W: TResponseWriter; R: TRequest; const FilePath: string);
+{$IFDEF LINUX}
+function getnameinfo(sa: psockaddr; salen: TSockLen;
+  host: PChar; hostlen: csize_t;
+  serv: PChar; servlen: csize_t;
+  flags: cint): cint; cdecl; external 'c' name 'getnameinfo';
+{$ENDIF}
 
 var
   ShutdownRequested: boolean = False;
@@ -598,11 +613,11 @@ begin
 end;
 
 {$IFDEF MSWINDOWS}
-function StrToNetAddrWin(const IP: AnsiString): in_addr;
+function StrToNetAddrWin(const IP: ansistring): in_addr;
 var
   a: in_addr;
 begin
-  a.S_addr := inet_addr(PAnsiChar(IP));
+  a.S_addr := inet_addr(pansichar(IP));
   Result := a;
 end;
 {$ENDIF}
@@ -1015,11 +1030,12 @@ begin
     Result := Conn = 'keep-alive';
 end;
 
-function ParseAddress(const Addr: string; out Host: string; out Port: Word): Boolean;
-  function StrToWordDef(const S: string; Default: Word): Word;
+function ParseAddress(const Addr: string; out Host: string; out Port: word): boolean;
+
+  function StrToWordDef(const S: string; Default: word): word;
   var
-    V: LongInt;
-    E: Integer;
+    V: longint;
+    E: integer;
   begin
     if S = '' then
       Exit(Default);
@@ -1030,13 +1046,14 @@ function ParseAddress(const Addr: string; out Host: string; out Port: Word): Boo
       Exit(Default);
 
 
-    if (V < Low(Word)) or (V > High(Word)) then
+    if (V < Low(word)) or (V > High(word)) then
       Exit(Default);
 
-    Result := Word(V);
+    Result := word(V);
   end;
+
 var
-  P: Integer;
+  P: integer;
 begin
   Result := False;
   Host := '';
@@ -1065,7 +1082,9 @@ begin
   end;
 end;
 
-
+{$IFNDEF MSWINDOWS}
+function gai_strerror(errcode: cint): PChar; cdecl; external 'c' name 'gai_strerror';
+{$ENDIF}
 
 function SockAddrStorageToStr(const SS: sockaddr_storage): string;
 const
@@ -1074,9 +1093,9 @@ const
   NI_NUMERICHOST = $02;
   NI_NUMERICSERV = $08;
 var
-  HostBuf: array[0..NI_MAXHOST - 1] of AnsiChar;
-  ServBuf: array[0..NI_MAXSERV - 1] of AnsiChar;
-  R: Integer;
+  HostBuf: array[0..NI_MAXHOST - 1] of ansichar;
+  ServBuf: array[0..NI_MAXSERV - 1] of ansichar;
+  R: integer;
   Host, Serv: string;
   SA: PSockAddr;
   SALen: TSockLen;
@@ -1086,32 +1105,31 @@ begin
 
   SA := PSockAddr(@SS);
   case SS.ss_family of
-    AF_INET:  SALen := SizeOf(sockaddr_in);
+    AF_INET: SALen := SizeOf(sockaddr_in);
     AF_INET6: SALen := SizeOf(sockaddr_in6);
-  else
-    Exit('unknown');
+    else
+      Exit('unknown');
   end;
 
   {$IFDEF MSWINDOWS}
   // WinSock2 getnameinfo returns 0 on success, otherwise WSA error code
-  R := getnameinfo(SA, SALen,
-                   @HostBuf[0], NI_MAXHOST,
-                   @ServBuf[0], NI_MAXSERV,
-                   NI_NUMERICHOST or NI_NUMERICSERV);
+  R := getnameinfo(SA, SALen, @HostBuf[0], NI_MAXHOST,
+    @ServBuf[0], NI_MAXSERV, NI_NUMERICHOST or
+    NI_NUMERICSERV);
   if R <> 0 then
     Exit('unknown');
   {$ELSE}
   // On Linux/BSD getnameinfo returns 0 on success, otherwise EAI_* code
-  R := fpgetnameinfo(SA, SALen,
+  R := getnameinfo(SA, SALen,
                      @HostBuf[0], NI_MAXHOST,
                      @ServBuf[0], NI_MAXSERV,
                      NI_NUMERICHOST or NI_NUMERICSERV);
   if R <> 0 then
-    Exit('unknown');
+    Exit('unknown (' + IntToStr(R) + '): ' + string(gai_strerror(R)));
   {$ENDIF}
 
-  Host := string(PAnsiChar(@HostBuf[0]));
-  Serv := string(PAnsiChar(@ServBuf[0]));
+  Host := string(pansichar(@HostBuf[0]));
+  Serv := string(pansichar(@ServBuf[0]));
 
   if SS.ss_family = AF_INET6 then
     Result := '[' + Host + ']:' + Serv
@@ -1859,7 +1877,7 @@ end;
 procedure TResponseWriter.Write(const S: string);
 var
   ChunkHdr: string;
-  Ret, Err: Integer;
+  Ret, Err: integer;
 begin
   if Length(S) = 0 then Exit;
 
@@ -1929,7 +1947,7 @@ end;
 procedure TResponseWriter.Write(const Buf; Size: integer);
 var
   ChunkHdr: string;
-  Ret, Err: Integer;
+  Ret, Err: integer;
 begin
   if Size <= 0 then Exit;
 
@@ -2480,13 +2498,13 @@ end;
 
 procedure THTTPServer.ProcessRequestsFromBuffer(Conn: PClientConnection);
 var
-  Head, Body: AnsiString;
-  NeedMoreData: Boolean;
+  Head, Body: ansistring;
+  NeedMoreData: boolean;
   ExpectValue: string;
-  I: Integer;
+  I: integer;
   PendingReq: PPendingRequest;
   ReceivedBodyLen: int64;
-  SwitchedToReadingBody: Boolean;
+  SwitchedToReadingBody: boolean;
   {$IFDEF ENABLE_HTTP2}
   H2Ret: cint;
   DataPtr: PByte;
@@ -2544,7 +2562,8 @@ begin
   end;
   {$ENDIF}
 
-  if (Conn^.State = csReadingHeaders) and (Length(Conn^.PlainInBuf) > FMaxHeaderBytes) then
+  if (Conn^.State = csReadingHeaders) and (Length(Conn^.PlainInBuf) >
+    FMaxHeaderBytes) then
   begin
     WriteLn('Header too large from ', Conn^.Addr);
     SendErrorResponse(Conn, 431, 'Request Header Fields Too Large');
@@ -2569,7 +2588,8 @@ begin
         begin
           PendingReq := PPendingRequest(Conn^.PipelineRequests[I]);
 
-          ParseRequestLine(PendingReq^.Head, Conn^.Addr, Conn^.UseTLS, Conn^.CurrentRequest);
+          ParseRequestLine(PendingReq^.Head, Conn^.Addr, Conn^.UseTLS,
+            Conn^.CurrentRequest);
           Conn^.KeepAlive := WantsKeepAlive(Conn^.CurrentRequest);
 
           ExpectValue := LowerCase(Conn^.CurrentRequest.Header.GetValue('expect'));
@@ -2579,12 +2599,14 @@ begin
             SendContinueResponse(Conn);
           end;
 
-          if Conn^.CurrentRequest.HasChunkedEncoding and (Conn^.CurrentRequest.ContentLength >= 0) then
+          if Conn^.CurrentRequest.HasChunkedEncoding and
+            (Conn^.CurrentRequest.ContentLength >= 0) then
             Conn^.CurrentRequest.ContentLength := -1;
 
           if Conn^.CurrentRequest.ContentLength > FMaxBodyBytes then
           begin
-            WriteLn('Body too large from ', Conn^.Addr, ': ', Conn^.CurrentRequest.ContentLength);
+            WriteLn('Body too large from ', Conn^.Addr, ': ',
+              Conn^.CurrentRequest.ContentLength);
             SendErrorResponse(Conn, 413, 'Payload Too Large');
             CloseConnection(Conn);
             Dispose(PendingReq);
@@ -2593,13 +2615,15 @@ begin
 
           Conn^.CurrentRequest.Body := string(PendingReq^.Body);
 
-          if (Conn^.CurrentRequest.ContentLength > 0) and (not Conn^.CurrentRequest.HasChunkedEncoding) then
+          if (Conn^.CurrentRequest.ContentLength > 0) and
+            (not Conn^.CurrentRequest.HasChunkedEncoding) then
           begin
             ReceivedBodyLen := Length(PendingReq^.Body);
 
             if ReceivedBodyLen < Conn^.CurrentRequest.ContentLength then
             begin
-              Conn^.BodyBytesRemaining := Conn^.CurrentRequest.ContentLength - ReceivedBodyLen;
+              Conn^.BodyBytesRemaining :=
+                Conn^.CurrentRequest.ContentLength - ReceivedBodyLen;
               Conn^.State := csReadingBody;
               Conn^.BodyBytesRead := ReceivedBodyLen;
 
@@ -2651,8 +2675,9 @@ begin
 
       if Length(Conn^.PlainInBuf) >= Conn^.BodyBytesRemaining then
       begin
-        Conn^.CurrentRequest.Body := Conn^.CurrentRequest.Body +
-          string(Copy(Conn^.PlainInBuf, 1, Conn^.BodyBytesRemaining));
+        Conn^.CurrentRequest.Body :=
+          Conn^.CurrentRequest.Body + string(Copy(Conn^.PlainInBuf,
+          1, Conn^.BodyBytesRemaining));
         Delete(Conn^.PlainInBuf, 1, Conn^.BodyBytesRemaining);
 
         Inc(Conn^.BodyBytesRead, Conn^.BodyBytesRemaining);
@@ -2666,7 +2691,8 @@ begin
       end
       else
       begin
-        Conn^.CurrentRequest.Body := Conn^.CurrentRequest.Body + string(Conn^.PlainInBuf);
+        Conn^.CurrentRequest.Body :=
+          Conn^.CurrentRequest.Body + string(Conn^.PlainInBuf);
 
         Inc(Conn^.BodyBytesRead, Length(Conn^.PlainInBuf));
 
@@ -2861,8 +2887,11 @@ var
   NumEvents, I: Integer;
   Conn: PClientConnection;
   LastTimeoutCheck: TDateTime;
-  ClientSock, Len: Integer;
-  ClientAddr: TSockAddrIn;
+  {ClientSock, Len: Integer;
+  ClientAddr: TSockAddrIn; }
+  ClientSock: Integer;
+  Len: TSockLen;
+  ClientSS: sockaddr_storage;
   ClientAddrStr: string;
 begin
   LastTimeoutCheck := Now;
@@ -2889,19 +2918,22 @@ begin
       begin
         // ====== Accept New Connections ======
         repeat
-          Len := SizeOf(ClientAddr);
-          ClientSock := SysAccept(FServerSock, ClientAddr, Len);
+          Len := SizeOf(ClientSS);
+          FillChar(ClientSS, SizeOf(ClientSS), 0);
 
+          // accept into sockaddr_storage
+          ClientSock := SysAccept(FServerSock, ClientSS, Integer(Len));
           if ClientSock = -1 then
           begin
-             if (fpgeterrno = ESysEAGAIN) or (fpgeterrno = ESysEWOULDBLOCK) then
-               Break;
-             Continue;
+            if (fpgeterrno = ESysEAGAIN) or (fpgeterrno = ESysEWOULDBLOCK) then
+              Break;
+            Continue;
           end;
 
           SysSetNonBlocking(ClientSock, True);
 
-          ClientAddrStr := NetAddrToStr(ClientAddr.sin_addr) + ':' + IntToStr(ntohs(ClientAddr.sin_port));
+          // Convert sockaddr_storage -> "ip:port" / "[ipv6]:port"
+          ClientAddrStr := SockAddrStorageToStr(ClientSS);
 
           New(Conn);
           Conn^.Sock := ClientSock;
@@ -3009,12 +3041,13 @@ begin
   WSABuf.buf := @IOCtx^.Buffer[0];
   Flags := 0;
 
-  if WSARecv(Conn^.Sock, @WSABuf, 1, BytesRecv, Flags, @IOCtx^.Overlapped, nil) = SOCKET_ERROR then
+  if WSARecv(Conn^.Sock, @WSABuf, 1, BytesRecv, Flags, @IOCtx^.Overlapped, nil) =
+    SOCKET_ERROR then
   begin
     if WSAGetLastError <> WSA_IO_PENDING then
     begin
       if Conn^.IOContext = IOCtx then
-         Conn^.IOContext := nil;
+        Conn^.IOContext := nil;
       Dispose(IOCtx);
       CloseConnection(Conn);
     end;
@@ -3028,7 +3061,7 @@ var
   Overlapped: POverlapped;
   IOCtx: PIOContext;
   Conn: PClientConnection;
-  Chunk: AnsiString;
+  Chunk: ansistring;
   LastTimeoutCheck: TDateTime;
 begin
   LastTimeoutCheck := Now;
@@ -3036,7 +3069,7 @@ begin
   while not ShutdownRequested do
   begin
     if not GetQueuedCompletionStatus(FIOCPHandle, BytesTransferred,
-                                     CompletionKey, Overlapped, 100) then
+      CompletionKey, Overlapped, 100) then
     begin
       if Overlapped <> nil then
       begin
@@ -3085,7 +3118,7 @@ begin
           end
           else
           begin
-            SetString(Chunk, PAnsiChar(@IOCtx^.Buffer[0]), BytesTransferred);
+            SetString(Chunk, pansichar(@IOCtx^.Buffer[0]), BytesTransferred);
             Conn^.PlainInBuf := Conn^.PlainInBuf + Chunk;
             Conn^.LastActivity := Now;
             ProcessRequestsFromBuffer(Conn);
@@ -3114,7 +3147,7 @@ begin
         WriteLn('IOCP error: ', E.Message);
         CloseConnection(Conn);
         if Conn^.IOContext = IOCtx then
-           Conn^.IOContext := nil;
+          Conn^.IOContext := nil;
         Dispose(IOCtx);
       end;
     end;
@@ -3939,6 +3972,14 @@ begin
   fpsetsockopt(FServerSock, SOL_SOCKET, SO_REUSEADDR, @OptVal, SizeOf(OptVal));
   {$ENDIF}
 
+  {$IFDEF LINUX}
+  if UseIPv6 then
+  begin
+    OptVal := 0; // 0 = allow v4-mapped on some systems
+    fpsetsockopt(FServerSock, IPPROTO_IPV6, IPV6_V6ONLY, @OptVal, SizeOf(OptVal));
+  end;
+  {$ENDIF}
+
   if UseIPv6 then
   begin
     FillChar(Sin6, SizeOf(Sin6), 0);
@@ -3965,7 +4006,13 @@ begin
     if (Host = '') or (Host = '*') then
       Sin.sin_addr.s_addr := INADDR_ANY
     else
-      Sin.sin_addr := {$IFDEF MSWINDOWS}StrToNetAddrWin(Host){$ELSE}StrToNetAddr(Host){$ENDIF};
+      Sin.sin_addr :=
+    {$IFDEF MSWINDOWS}
+        StrToNetAddrWin(Host)
+    {$ELSE}
+StrToNetAddr(Host)
+    {$ENDIF}
+    ;
 
     {$IFDEF WINDOWS}
     if bind(TSocket(FServerSock), PSockAddr(@Sin), SizeOf(Sin)) = SOCKET_ERROR then
@@ -4145,6 +4192,14 @@ begin
   fpsetsockopt(FServerSock, SOL_SOCKET, SO_REUSEADDR, @OptVal, SizeOf(OptVal));
   {$ENDIF}
 
+  {$IFDEF LINUX}
+  if UseIPv6 then
+  begin
+    OptVal := 0; // 0 = allow v4-mapped on some systems
+    fpsetsockopt(FServerSock, IPPROTO_IPV6, IPV6_V6ONLY, @OptVal, SizeOf(OptVal));
+  end;
+  {$ENDIF}
+
   if UseIPv6 then
   begin
     FillChar(Sin6, SizeOf(Sin6), 0);
@@ -4171,7 +4226,13 @@ begin
     if (Host = '') or (Host = '*') then
       Sin.sin_addr.s_addr := INADDR_ANY
     else
-      Sin.sin_addr := {$IFDEF MSWINDOWS}StrToNetAddrWin(Host){$ELSE}StrToNetAddr(Host){$ENDIF};
+      Sin.sin_addr :=
+    {$IFDEF MSWINDOWS}
+        StrToNetAddrWin(Host)
+    {$ELSE}
+StrToNetAddr(Host)
+    {$ENDIF}
+    ;
 
     {$IFDEF WINDOWS}
     if bind(TSocket(FServerSock), PSockAddr(@Sin), SizeOf(Sin)) = SOCKET_ERROR then
