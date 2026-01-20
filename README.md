@@ -367,7 +367,7 @@ begin
   end;
 end.
 ```
-### AdvancedHTTPRouter: Features and Benefits
+### AdvancedHTTPRouter: The middleware high-perfomance router
 
 **AdvancedHTTPRouter** is a high-performance, lightweight HTTP router designed specifically to integrate with your `AdvancedHTTPServer`. It provides a modern, structured way to define routes, handle requests, and organize application logic, inspired by popular frameworks like Gin (Go) or Echo.
 
