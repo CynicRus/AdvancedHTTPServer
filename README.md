@@ -240,8 +240,8 @@ apiV1.HandleFunc('/users', UsersV1);
 | JSON handling                    | —                    | use fpjson / other libraries                   |
 | Graceful shutdown                | partial              | basic support exists                           |
 | Request body size limit          | ✓                    | configurable                                   |
-| Route groups / subrouters        | —                    | must be implemented manually for now           |
-| URL parameters / :id style       | —                    | need own router layer                          |
+| Route groups / subrouters        | ✓                    | Implemented in AdvancedHTTPRouter              |
+| URL parameters / :id style       | ✓                    | Implemented in AdvancedHTTPRouter              |
 
 ### Dependencies
 
