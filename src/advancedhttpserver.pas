@@ -68,6 +68,8 @@ const
   EPOLLERR = $008;
   EPOLLHUP = $010;
   EPOLLET = 1 shl 31;
+  // Linux specific constant for SO_REUSEPORT (usually 15)
+  SO_REUSEPORT = 15;
 
 type
   epoll_data = record
@@ -108,8 +110,9 @@ function epoll_wait(epfd: Integer; events: Pointer; maxevents: Integer; timeout:
   {$ENDIF}
   {$IFDEF LINUX}
   type
-  sockaddr_storage = record
-    ss_family : sa_family_t;
+  sockaddr_storage = packed record
+    ss_family: sa_family_t;
+    __ss_padding: array[0..125] of Byte; // for size 128
   end;
 
   {$ENDIF}
@@ -348,6 +351,10 @@ type
     WriteBIO: PBIO;
     HandshakeDone: boolean;
 
+    {$IFDEF LINUX}
+    EpollFd: Integer;        // epoll instance обслуживающего воркера
+    EpollEvents: Cardinal;   // текущая маска (без EPOLLET)
+    {$ENDIF}
     {$IFDEF WINDOWS}
     // IOCP specific
     IOContext: PIOContext;
@@ -377,9 +384,39 @@ type
 
   TConnectionList = specialize TFPGList<PClientConnection>;
 
+  { TEpollWorkerThread }
+  {$IFDEF LINUX}
+  type
+  TEpollWorkerThread = class(TThread)
+  private
+    FServer: THTTPServer;
+    FHost: string;
+    FPort: Word;
+    FUseIPv6: Boolean;
+    FUseTLS: Boolean;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(AServer: THTTPServer; const AHost: string; APort: Word; AUseIPv6, AUseTLS: Boolean);
+  end;
+  {$ENDIF}
+
   { THTTPServer }
   THTTPServer = class
   private
+    // Proxy / real IP settings
+    FBehindProxy: Boolean;
+    FTrustedProxyCIDRs: TStringList;
+    FUseForwardedHeaders: Boolean;
+    FUseXForwardedFor: Boolean;
+    FUseXRealIP: Boolean;
+
+    // Worker threads support
+    FWorkerCount: Integer;
+    FWorkers: array of TThread;
+
+
+
     FRoutes: TRouteList;
     FHostRoutes: THostRouteList;
     FMiddlewares: array of TMiddleware;
@@ -413,6 +450,20 @@ type
     {$ENDIF}
     {$IFDEF ENABLE_HTTP2}
     function InitHTTP2Session(Conn: PClientConnection): Boolean;
+    {$ENDIF}
+    function IsTrustedProxyRemote(const ClientAddr: string): Boolean;
+    function ExtractAddrHost(const ClientAddr: string): string;
+    function NormalizeIPLiteral(const S: string): string;
+    function IPv4ToUInt32(const S: string; out V: Cardinal): Boolean;
+    function IPv6ToBytes(const S: string; out B: array of Byte): Boolean;
+    function ParseCIDR(const CIDR: string; out IsV6: Boolean; out Net4: Cardinal; out Prefix: Integer; out Net6: array of Byte): Boolean;
+    function IPInCIDR(const IP, CIDR: string): Boolean;
+    function ExtractRealIPFromHeaders(const H: THeader): string;
+    function ParseForwardedFor(const S: string): string;
+    function ParseXForwardedFor(const S: string): string;
+    {$IFDEF LINUX}
+    function CreateListenSocket(const Host: string; Port: Word; UseIPv6: Boolean): Integer;
+    procedure RunEpollWorker(const Host: string; Port: Word; UseIPv6: Boolean; UseTLS: Boolean);
     {$ENDIF}
     procedure ProcessRequestsFromBuffer(Conn: PClientConnection);
 
@@ -463,6 +514,15 @@ type
     property ConnectionTimeout: integer read FConnectionTimeout write FConnectionTimeout;
     property MaxHeaderBytes: int64 read FMaxHeaderBytes write FMaxHeaderBytes;
     property MaxBodyBytes: int64 read FMaxBodyBytes write FMaxBodyBytes;
+
+    // Enable extracting real client IP from proxy headers (only for trusted proxies)
+    property BehindProxy: Boolean read FBehindProxy write FBehindProxy;
+    property TrustedProxyCIDRs: TStringList read FTrustedProxyCIDRs; // user populates list
+    property UseForwardedHeaders: Boolean read FUseForwardedHeaders write FUseForwardedHeaders;
+    property UseXForwardedFor: Boolean read FUseXForwardedFor write FUseXForwardedFor;
+    property UseXRealIP: Boolean read FUseXRealIP write FUseXRealIP;
+
+    property WorkerCount: Integer read FWorkerCount write FWorkerCount;
   end;
 
 {$IFDEF WINDOWS}
@@ -1076,6 +1136,9 @@ begin
     P := LastDelimiter(':', Addr);
     if P = 0 then Exit;
     Host := Copy(Addr, 1, P - 1);
+    Port := StrToWordDef(Copy(Addr, P + 2, MaxInt), 0); // Copy uses start index, length is MaxInt. Wait.
+    // Fix: LastDelimiter returns index.
+    // Copy(Addr, P+1, MaxInt)
     Port := StrToWordDef(Copy(Addr, P + 1, MaxInt), 0);
     if Port = 0 then Exit;
     Result := True;
@@ -1656,37 +1719,67 @@ end;
 procedure TResponseWriter.SendRaw(const Buf; Size: integer);
 {$IFDEF LINUX}
 var
-  Ret, Err: Integer;
+  P: PByte;
+  ToSend, Sent, Ret: Integer;
+  Err: Integer;
+  Tmp: AnsiString;
 begin
-  if Size <= 0 then Exit;
+  if (Size <= 0) or (FConn = nil) then Exit;
 
+  // First, we convert what needs to be sent into a byte stream "on the wire."
+  // TLS: SSL_write -> the data will end up in WriteBIO -> in OutBuf
   if FUseTLS then
   begin
-    // Encrypt via SSL_write -> WriteBIO
     Ret := SSLWrite(FSSL, @Buf, Size);
     if Ret <= 0 then
     begin
       Err := SSLGetError(FSSL, Ret);
-      if (Err = SSL_ERROR_WANT_WRITE) or (Err = SSL_ERROR_WANT_READ) then
-         // In Memory BIO mode, this is rare unless buffer full, handle gracefully
-      else
+      if (Err <> SSL_ERROR_WANT_WRITE) and (Err <> SSL_ERROR_WANT_READ) then
       begin
         LogSSLError('SSL_write failed');
         raise Exception.CreateFmt('SSL_write failed: %d', [Err]);
       end;
     end;
-    // Move encrypted data from WriteBIO to OutBuf (for epoll to send)
+
+    // extract the text to OutBuf
     FServer.FlushWriteBIOToOutBuf(FConn);
   end
   else
   begin
-    // Plain HTTP: append to OutBuf directly
-    SetString(AnsiString(FConn^.OutBuf), PAnsiChar(@Buf), Size);
+    // Plain: put in OutBuf, but with an immediate write attempt below
+    SetString(Tmp, PAnsiChar(@Buf), Size);
+
+    // If OutBuf is empty, we try send() immediately (like nginx: writev/flush in the handler)
+    if Length(FConn^.OutBuf) = 0 then
+    begin
+      P := PByte(@Tmp[1]);
+      ToSend := Length(Tmp);
+      Sent := 0;
+
+      while Sent < ToSend do
+      begin
+        Ret := SysSend(FSocket, P[Sent], ToSend - Sent, 0);
+        if Ret > 0 then
+          Inc(Sent, Ret)
+        else
+        begin
+          if (fpgeterrno = ESysEAGAIN) or (fpgeterrno = ESysEWOULDBLOCK) then
+            Break;
+          raise Exception.CreateFmt('send failed errno=%d', [fpgeterrno]);
+        end;
+      end;
+
+      if Sent < ToSend then
+        FConn^.OutBuf := FConn^.OutBuf + Copy(Tmp, Sent + 1, MaxInt);
+    end
+    else
+      FConn^.OutBuf := FConn^.OutBuf + Tmp;
   end;
 
-  // Try to send immediately
+  // For TLS, OutBuf is already full (or partially full). We'll try to allow it immediately.
   FServer.HandleEpollWrite(FConn);
-  // If data remains, enable EPOLLOUT
+
+  // If the tail remains, enable EPOLLOUT on the correct epoll
   if Length(FConn^.OutBuf) > 0 then
     FServer.EnableWriteNotifications(FConn);
 end;
@@ -2083,6 +2176,18 @@ begin
   FBodyReadTimeout := BODY_READ_TIMEOUT;
   FMaxHeaderBytes := MAX_HEADER_BYTES;
   FMaxBodyBytes := MAX_BODY_BYTES;
+
+  // Proxy / Real IP Init
+  FTrustedProxyCIDRs := TStringList.Create;
+  FTrustedProxyCIDRs.CaseSensitive := False;
+  FBehindProxy := False;
+  FUseForwardedHeaders := True;
+  FUseXForwardedFor := True;
+  FUseXRealIP := True;
+
+  // Workers Init
+  FWorkerCount := 0; // User should set this, usually to CPUCount
+
   {$IFDEF LINUX}
   FEpollFd := -1;
   FServerIsTLS := False;
@@ -2097,6 +2202,9 @@ begin
   Shutdown;
   RTLeventDestroy(FShutdownEvent);
   CleanupSSL;
+
+  FTrustedProxyCIDRs.Free;
+
   FConnections.Free;
   FRoutes.Free;
   FHostRoutes.Free;
@@ -2738,11 +2846,24 @@ end;
 procedure THTTPServer.ModEpoll(Sock: Integer; Conn: PClientConnection; Events: Cardinal);
 var
   E: epoll_event;
+  NewMask: Cardinal;
+  Epfd: Integer;
 begin
+  if (Conn = nil) then Exit;
+
+  Epfd := Conn^.EpollFd;
+  if Epfd < 0 then Exit;
+
+  NewMask := Events;
+
+  if Conn^.EpollEvents = NewMask then Exit;
+  Conn^.EpollEvents := NewMask;
+
   FillChar(E, SizeOf(E), 0);
-  E.events := Events or EPOLLET;
+  E.events := NewMask or EPOLLET;
   E.data.ptr := Conn;
-  if epoll_ctl(FEpollFd, EPOLL_CTL_MOD, Sock, @E) < 0 then
+
+  if epoll_ctl(Epfd, EPOLL_CTL_MOD, Sock, @E) < 0 then
     WriteLn('epoll_ctl MOD failed for socket ', Sock, ' errno=', fpgeterrno);
 end;
 
@@ -2969,7 +3090,7 @@ begin
             Conn^.UseTLS := True;
             Conn^.ReadBIO := BIONew(BioSMem());
             Conn^.WriteBIO := BIONew(BioSMem());
-            SSLSetBio(Conn^.SSL, Conn^.ReadBIO, Conn^.WriteBIO);
+            SSLSetbio(Conn^.SSL, Conn^.ReadBIO, Conn^.WriteBIO);
             SSLSetAcceptState(Conn^.SSL);
             Conn^.HandshakeDone := False;
             Conn^.State := csSSLHandshake;
@@ -2981,6 +3102,8 @@ begin
             Conn^.UseTLS := False;
             Conn^.State := csReadingHeaders;
           end;
+          Conn^.EpollFd := FEpollFd;
+          Conn^.EpollEvents := EPOLLIN;
 
           FConnections.Add(Conn);
           IncConnections;
@@ -3006,6 +3129,294 @@ begin
       end;
     end;
   end;
+end;
+
+{ --- Multi-threaded Epoll Worker Implementation --- }
+
+constructor TEpollWorkerThread.Create(AServer: THTTPServer; const AHost: string; APort: Word; AUseIPv6, AUseTLS: Boolean);
+begin
+  inherited Create(False);
+  FreeOnTerminate := False;
+  FServer := AServer;
+  FHost := AHost;
+  FPort := APort;
+  FUseIPv6 := AUseIPv6;
+  FUseTLS := AUseTLS;
+end;
+
+procedure TEpollWorkerThread.Execute;
+begin
+  FServer.RunEpollWorker(FHost, FPort, FUseIPv6, FUseTLS);
+end;
+
+function THTTPServer.CreateListenSocket(const Host: string; Port: Word; UseIPv6: Boolean): Integer;
+var
+  Sin: TSockAddrIn;
+  Sin6: sockaddr_in6;
+  OptVal: Integer;
+begin
+  Result := -1;
+
+  {$IFDEF WINDOWS}
+  raise Exception.Create('CreateListenSocket is used only on Linux in this patch');
+  {$ELSE}
+  if UseIPv6 then
+    Result := fpsocket(AF_INET6, SOCK_STREAM, 0)
+  else
+    Result := fpsocket(AF_INET, SOCK_STREAM, 0);
+  if Result = -1 then Exit;
+
+  OptVal := 1;
+  fpsetsockopt(Result, SOL_SOCKET, SO_REUSEADDR, @OptVal, SizeOf(OptVal));
+
+  {$IFDEF LINUX}
+  // Critical for multi-worker accept scaling
+  if fpsetsockopt(Result, SOL_SOCKET, SO_REUSEPORT, @OptVal, SizeOf(OptVal)) <> 0 then
+     raise Exception.CreateFmt('setsockopt(SO_REUSEPORT) failed, errno=%d', [fpgeterrno]);
+  {$ENDIF}
+
+  if UseIPv6 then
+  begin
+    FillChar(Sin6, SizeOf(Sin6), 0);
+    Sin6.sin6_family := AF_INET6;
+    Sin6.sin6_port := htons(Port);
+    if (Host <> '') and (Host <> '*') then
+      Sin6.sin6_addr := StrToNetAddr6(Host);
+    if fpbind(Result, @Sin6, SizeOf(Sin6)) = -1 then
+      raise Exception.CreateFmt('Bind failed, errno=%d', [fpgeterrno]);
+  end
+  else
+  begin
+    FillChar(Sin, SizeOf(Sin), 0);
+    Sin.sin_family := AF_INET;
+    Sin.sin_port := htons(Port);
+    if (Host = '') or (Host = '*') then
+      Sin.sin_addr.s_addr := INADDR_ANY
+    else
+      Sin.sin_addr := StrToNetAddr(Host);
+    if fpbind(Result, @Sin, SizeOf(Sin)) = -1 then
+       raise Exception.CreateFmt('Bind failed, errno=%d', [fpgeterrno]);
+  end;
+
+  if fplisten(Result, 1024) = -1 then
+    raise Exception.Create('Listen failed');
+
+  SysSetNonBlocking(Result, True);
+  {$ENDIF}
+end;
+
+procedure THTTPServer.RunEpollWorker(const Host: string; Port: Word; UseIPv6: Boolean; UseTLS: Boolean);
+var
+  EpollFd: Integer;
+  ServerSock: Integer;
+  Event: epoll_event;
+  Events: array[0..63] of epoll_event;
+  NumEvents, I: Integer;
+  Conn: PClientConnection;
+  LastTimeoutCheck: TDateTime;
+  ClientSock: Integer;
+  Len: TSockLen;
+  ClientSS: sockaddr_storage;
+  ClientAddrStr: string;
+  ServerIsTLS: Boolean;
+
+  procedure AddListenToEpoll;
+  begin
+    FillChar(Event, SizeOf(Event), 0);
+    Event.events := EPOLLIN;
+    Event.data.fd := ServerSock;
+    if epoll_ctl(EpollFd, EPOLL_CTL_ADD, ServerSock, @Event) < 0 then
+      raise Exception.Create('Failed to add listen socket to epoll');
+  end;
+
+  procedure AddConnToEpoll(Sock: Integer; C: PClientConnection);
+  var E: epoll_event;
+  begin
+    FillChar(E, SizeOf(E), 0);
+    E.events := EPOLLIN or EPOLLET;
+    C^.EpollEvents := EPOLLIN;
+    E.data.ptr := C;
+    if epoll_ctl(EpollFd, EPOLL_CTL_ADD, Sock, @E) < 0 then
+      WriteLn('epoll_ctl ADD failed for socket ', Sock);
+  end;
+
+  {procedure ModConnEpoll(Sock: Integer; C: PClientConnection; EventsMask: Cardinal);
+  var E: epoll_event;
+  begin
+    FillChar(E, SizeOf(E), 0);
+    E.events := EventsMask or EPOLLET;
+    E.data.ptr := C;
+    if epoll_ctl(EpollFd, EPOLL_CTL_MOD, Sock, @E) < 0 then
+      WriteLn('epoll_ctl MOD failed for socket ', Sock, ' errno=', fpgeterrno);
+  end;
+
+  procedure EnableWrite(C: PClientConnection);
+  begin
+    ModConnEpoll(C^.Sock, C, EPOLLIN or EPOLLOUT);
+  end;
+
+  procedure DisableWrite(C: PClientConnection);
+  begin
+    ModConnEpoll(C^.Sock, C, EPOLLIN);
+  end;
+
+  procedure RemoveFromEpollLocal(Sock: Integer);
+  begin
+    epoll_ctl(EpollFd, EPOLL_CTL_DEL, Sock, nil);
+  end;
+
+  procedure HandleWriteLocal(C: PClientConnection);
+  var Ret: Integer;
+  begin
+    if C^.State = csClosed then Exit;
+    if Length(C^.OutBuf) = 0 then
+    begin
+      DisableWrite(C);
+      Exit;
+    end;
+    while Length(C^.OutBuf) > 0 do
+    begin
+      Ret := SysSend(C^.Sock, C^.OutBuf[1], Length(C^.OutBuf), 0);
+      if Ret > 0 then
+        Delete(C^.OutBuf, 1, Ret)
+      else
+      begin
+        if (fpgeterrno = ESysEAGAIN) or (fpgeterrno = ESysEWOULDBLOCK) then
+          Break;
+        CloseConnection(C);
+        Exit;
+      end;
+    end;
+    if Length(C^.OutBuf) = 0 then DisableWrite(C) else EnableWrite(C);
+  end;  }
+
+begin
+  ServerIsTLS := UseTLS;
+
+  // per-worker epoll + listen socket
+  EpollFd := epoll_create(1024);
+  if EpollFd < 0 then
+    raise Exception.Create('epoll_create failed');
+
+  ServerSock := CreateListenSocket(Host, Port, UseIPv6);
+  if ServerSock < 0 then
+    raise Exception.Create('Failed to create listen socket');
+
+  AddListenToEpoll;
+  LastTimeoutCheck := Now;
+
+  while not ShutdownRequested do
+  begin
+    NumEvents := epoll_wait(EpollFd, @Events[0], Length(Events), 100);
+
+    if SecondsBetween(Now, LastTimeoutCheck) >= 1 then
+    begin
+      CheckConnectionTimeouts;
+      LastTimeoutCheck := Now;
+    end;
+
+    if NumEvents < 0 then
+    begin
+      if ShutdownRequested then Break;
+      Continue;
+    end;
+
+    for I := 0 to NumEvents-1 do
+    begin
+      if Events[I].data.fd = ServerSock then
+      begin
+        repeat
+          Len := SizeOf(ClientSS);
+          FillChar(ClientSS, SizeOf(ClientSS), 0);
+          ClientSock := SysAccept(ServerSock, ClientSS, Integer(Len));
+          if ClientSock = -1 then
+          begin
+            if (fpgeterrno = ESysEAGAIN) or (fpgeterrno = ESysEWOULDBLOCK) then Break;
+            Continue;
+          end;
+
+          SysSetNonBlocking(ClientSock, True);
+          ClientAddrStr := SockAddrStorageToStr(ClientSS);
+
+          New(Conn);
+          Conn^.Sock := ClientSock;
+          Conn^.Addr := ClientAddrStr;
+          Conn^.PlainInBuf := '';
+          Conn^.OutBuf := '';
+          Conn^.CurrentRequest := nil;
+          Conn^.CurrentWriter := nil;
+          Conn^.KeepAlive := True;
+          Conn^.PipelineRequests := TList.Create;
+          Conn^.LastActivity := Now;
+          Conn^.LastStateChange := Now;
+          Conn^.ChunkBytesRemaining := 0;
+          Conn^.BodyBytesRemaining := 0;
+          Conn^.ExpectingContinue := False;
+          Conn^.HeaderBytesRead := 0;
+          Conn^.BodyBytesRead := 0;
+          Conn^.SSLHandshakeStarted := False;
+          Conn^.HeaderStartTime := Now;
+          Conn^.Server := Self;
+
+          {$IFDEF ENABLE_HTTP2}
+          Conn^.HTTP2Session := nil;
+          Conn^.HTTP2Enabled := False;
+          Conn^.HTTP2PrefaceReceived := False;
+          Conn^.HTTP2Streams := nil;
+          {$ENDIF}
+
+          if ServerIsTLS then
+          begin
+            Conn^.SSL := SSLNew(FSSLCtx);
+            Conn^.UseTLS := True;
+            Conn^.ReadBIO := BIONew(BioSMem());
+            Conn^.WriteBIO := BIONew(BioSMem());
+            SSLSetbio(Conn^.SSL, Conn^.ReadBIO, Conn^.WriteBIO);
+            SSLSetAcceptState(Conn^.SSL);
+            Conn^.HandshakeDone := False;
+            Conn^.State := csSSLHandshake;
+          end
+          else
+          begin
+            Conn^.SSL := nil;
+            Conn^.UseTLS := False;
+            Conn^.State := csReadingHeaders;
+          end;
+
+          Conn^.EpollFd := EpollFd;
+          Conn^.EpollEvents := EPOLLIN;
+
+          // IMPORTANT: shared list is guarded in CheckConnectionTimeouts, but Add/Remove were not locked
+          FConnectionsLock.Enter;
+          try
+            FConnections.Add(Conn);
+            Inc(FActiveConnections);
+          finally
+            FConnectionsLock.Leave;
+          end;
+
+          AddConnToEpoll(ClientSock, Conn);
+        until False;
+      end
+      else
+      begin
+        Conn := PClientConnection(Events[I].data.ptr);
+        if (Events[I].events and (EPOLLERR or EPOLLHUP)) <> 0 then
+        begin
+          CloseConnection(Conn);
+          Continue;
+        end;
+        if (Events[I].events and EPOLLIN) <> 0 then
+          HandleEpollRead(Conn);
+        if (Events[I].events and EPOLLOUT) <> 0 then
+          HandleEpollWrite(Conn);
+      end;
+    end;
+  end;
+
+  // cleanup
+  if ServerSock >= 0 then fpClose(ServerSock);
+  if EpollFd >= 0 then fpClose(EpollFd);
 end;
 {$ENDIF}
 
@@ -3160,31 +3571,43 @@ var
   I: integer;
   Conn: PClientConnection;
   Timeout: integer;
+  ToClose: TList; // Collect to close outside lock to avoid deadlock with CloseConnection
 begin
-  FConnectionsLock.Enter;
+  ToClose := TList.Create;
   try
-    for I := FConnections.Count - 1 downto 0 do
-    begin
-      Conn := PClientConnection(FConnections[I]);
-      if not Assigned(Conn) then Continue;
-
-      case Conn^.State of
-        csSSLHandshake, csReadingHeaders:
-          Timeout := FHeaderReadTimeout;
-        csReadingBody, csReadingChunks:
-          Timeout := FBodyReadTimeout;
-        else
-          Timeout := FConnectionTimeout;
-      end;
-
-      if SecondsBetween(Now, Conn^.LastActivity) > Timeout then
+    FConnectionsLock.Enter;
+    try
+      for I := FConnections.Count - 1 downto 0 do
       begin
-        WriteLn('Closing idle connection: ', Conn^.Addr);
-        CloseConnection(Conn);
+        Conn := PClientConnection(FConnections[I]);
+        if not Assigned(Conn) then Continue;
+
+        case Conn^.State of
+          csSSLHandshake, csReadingHeaders:
+            Timeout := FHeaderReadTimeout;
+          csReadingBody, csReadingChunks:
+            Timeout := FBodyReadTimeout;
+          else
+            Timeout := FConnectionTimeout;
+        end;
+
+        if SecondsBetween(Now, Conn^.LastActivity) > Timeout then
+        begin
+          WriteLn('Closing idle connection: ', Conn^.Addr);
+          ToClose.Add(Conn);
+        end;
       end;
+    finally
+      FConnectionsLock.Leave;
+    end;
+
+    // Close connections outside the lock
+    for I := 0 to ToClose.Count - 1 do
+    begin
+      CloseConnection(PClientConnection(ToClose[I]));
     end;
   finally
-    FConnectionsLock.Leave;
+    ToClose.Free;
   end;
 end;
 
@@ -3335,6 +3758,271 @@ begin
   end;
 end;
 
+{ --- Proxy / Real IP helpers --- }
+
+function THTTPServer.ExtractAddrHost(const ClientAddr: string): string;
+var
+  P: Integer;
+  S: string;
+begin
+  // ClientAddr format in this server is either "ip:port" or "[ipv6]:port" or "unknown..."
+  S := Trim(ClientAddr);
+  if S = '' then Exit('');
+
+  if (Length(S) > 0) and (S[1] = '[') then
+  begin
+    P := Pos(']', S);
+    if P > 0 then
+      Exit(Copy(S, 2, P - 2));
+  end;
+
+  // strip ":port" if present (best effort)
+  P := LastDelimiter(':', S);
+  if (P > 0) and (Pos(':', Copy(S, 1, P - 1)) = 0) then
+    Exit(Copy(S, 1, P - 1));
+
+  Result := S;
+end;
+
+function THTTPServer.NormalizeIPLiteral(const S: string): string;
+var
+  T: string;
+begin
+  T := Trim(S);
+  if T = '' then Exit('');
+
+  // Remove surrounding quotes
+  if (Length(T) >= 2) and (T[1] = '"') and (T[Length(T)] = '"') then
+    T := Copy(T, 2, Length(T) - 2);
+
+  // Remove brackets for IPv6 like "[::1]"
+  if (Length(T) >= 2) and (T[1] = '[') and (T[Length(T)] = ']') then
+    T := Copy(T, 2, Length(T) - 2);
+
+  // Drop :port for IPv4 form "1.2.3.4:1234" (do NOT attempt for IPv6)
+  if (Pos(':', T) > 0) and (Pos('.', T) > 0) and (Pos(':', T) = LastDelimiter(':', T)) then
+  begin
+    // looks like ipv4:port
+    T := Copy(T, 1, LastDelimiter(':', T) - 1);
+  end;
+
+  Result := Trim(T);
+end;
+
+function THTTPServer.IPv4ToUInt32(const S: string; out V: Cardinal): Boolean;
+var
+  Parts: TStringArray;
+  I: Integer;
+  N: Integer;
+begin
+  Result := False;
+  V := 0;
+  Parts := S.Split(['.']);
+  if Length(Parts) <> 4 then Exit(False);
+  for I := 0 to 3 do
+  begin
+    if not TryStrToInt(Parts[I], N) then Exit(False);
+    if (N < 0) or (N > 255) then Exit(False);
+    V := (V shl 8) or Cardinal(N);
+  end;
+  Result := True;
+end;
+
+function THTTPServer.IPv6ToBytes(const S: string; out B: array of Byte): Boolean;
+var
+  In6: in6_addr;
+  Tmp: string;
+begin
+  Result := False;
+  if Length(B) < 16 then Exit(False);
+  Tmp := Trim(S);
+  if Tmp = '' then Exit(False);
+
+  // StrToNetAddr6 expects pure literal, no brackets
+  try
+    In6 := StrToNetAddr6(Tmp);
+    Move(In6, B[0], 16);
+    Result := True;
+  except
+    Result := False;
+  end;
+end;
+
+function THTTPServer.ParseCIDR(const CIDR: string; out IsV6: Boolean; out Net4: Cardinal;
+  out Prefix: Integer; out Net6: array of Byte): Boolean;
+var
+  S, IPPart, PrefixPart: string;
+  Slash: Integer;
+begin
+  Result := False;
+  IsV6 := False;
+  Net4 := 0;
+  Prefix := -1;
+  if Length(Net6) < 16 then Exit(False);
+  FillChar(Net6[0], 16, 0);
+
+  S := Trim(CIDR);
+  if S = '' then Exit(False);
+  if S.StartsWith('#') then Exit(False);
+
+  Slash := Pos('/', S);
+  if Slash <= 0 then Exit(False);
+  IPPart := Trim(Copy(S, 1, Slash - 1));
+  PrefixPart := Trim(Copy(S, Slash + 1, MaxInt));
+  if not TryStrToInt(PrefixPart, Prefix) then Exit(False);
+
+  IPPart := NormalizeIPLiteral(IPPart);
+  if Pos(':', IPPart) > 0 then
+  begin
+    IsV6 := True;
+    if (Prefix < 0) or (Prefix > 128) then Exit(False);
+    if not IPv6ToBytes(IPPart, Net6) then Exit(False);
+    Result := True;
+  end
+  else
+  begin
+    IsV6 := False;
+    if (Prefix < 0) or (Prefix > 32) then Exit(False);
+    if not IPv4ToUInt32(IPPart, Net4) then Exit(False);
+    Result := True;
+  end;
+end;
+
+function THTTPServer.IPInCIDR(const IP, CIDR: string): Boolean;
+var
+  IsV6: Boolean;
+  Net4, IP4: Cardinal;
+  Prefix: Integer;
+  Net6: array[0..15] of Byte;
+  IP6: array[0..15] of Byte;
+  Mask: Cardinal;
+  I, FullBytes, RemBits: Integer;
+  M: Byte;
+begin
+  Result := False;
+  if not ParseCIDR(CIDR, IsV6, Net4, Prefix, Net6) then Exit(False);
+
+  if IsV6 then
+  begin
+    if Pos(':', IP) <= 0 then Exit(False);
+    if not IPv6ToBytes(IP, IP6) then Exit(False);
+    FullBytes := Prefix div 8;
+    RemBits := Prefix mod 8;
+
+    for I := 0 to FullBytes - 1 do
+      if IP6[I] <> Net6[I] then Exit(False);
+
+    if RemBits = 0 then Exit(True);
+    M := Byte($FF) shl (8 - RemBits);
+    Result := (IP6[FullBytes] and M) = (Net6[FullBytes] and M);
+  end
+  else
+  begin
+    if Pos(':', IP) > 0 then Exit(False);
+    if not IPv4ToUInt32(IP, IP4) then Exit(False);
+    if Prefix = 0 then Exit(True);
+    Mask := Cardinal($FFFFFFFF) shl (32 - Prefix);
+    Result := (IP4 and Mask) = (Net4 and Mask);
+  end;
+end;
+
+function THTTPServer.IsTrustedProxyRemote(const ClientAddr: string): Boolean;
+var
+  RemoteIP: string;
+  I: Integer;
+begin
+  Result := False;
+  if (not FBehindProxy) then Exit(False);
+  if (FTrustedProxyCIDRs = nil) or (FTrustedProxyCIDRs.Count = 0) then Exit(False);
+
+  RemoteIP := NormalizeIPLiteral(ExtractAddrHost(ClientAddr));
+  if RemoteIP = '' then Exit(False);
+
+  for I := 0 to FTrustedProxyCIDRs.Count - 1 do
+    if IPInCIDR(RemoteIP, FTrustedProxyCIDRs[I]) then
+      Exit(True);
+end;
+
+function THTTPServer.ParseForwardedFor(const S: string): string;
+var
+  L, Item, Val: string;
+  Parts: TStringArray;
+  I, P: Integer;
+begin
+  // Forwarded: for=1.2.3.4;proto=https, for="[2001:db8::1]"
+  Result := '';
+  L := Trim(S);
+  if L = '' then Exit('');
+
+  // take first element before comma (closest client)
+  P := Pos(',', L);
+  if P > 0 then
+    L := Copy(L, 1, P - 1);
+
+  Parts := L.Split([';']);
+  for I := 0 to High(Parts) do
+  begin
+    Item := Trim(Parts[I]);
+    if Item = '' then Continue;
+    if LowerCase(LeftStr(Item, 4)) = 'for=' then
+    begin
+      Val := Copy(Item, 5, MaxInt);
+      Val := NormalizeIPLiteral(Val);
+      // RFC allows "unknown" or obfuscated identifiers; ignore those
+      if (Val <> '') and (LowerCase(Val) <> 'unknown') and (Pos('_', Val) = 0) then
+        Exit(Val);
+    end;
+  end;
+end;
+
+function THTTPServer.ParseXForwardedFor(const S: string): string;
+var
+  L: string;
+  Parts: TStringArray;
+  I: Integer;
+begin
+  // X-Forwarded-For: client, proxy1, proxy2
+  Result := '';
+  L := Trim(S);
+  if L = '' then Exit('');
+  Parts := L.Split([',']);
+  for I := 0 to High(Parts) do
+  begin
+    L := NormalizeIPLiteral(Parts[I]);
+    if (L <> '') and (LowerCase(L) <> 'unknown') then
+      Exit(L); // left-most is original client per de-facto standard
+  end;
+end;
+
+function THTTPServer.ExtractRealIPFromHeaders(const H: THeader): string;
+var
+  V: string;
+begin
+  Result := '';
+  if H = nil then Exit('');
+
+  if FUseForwardedHeaders then
+  begin
+    V := H.GetValue('Forwarded');
+    Result := ParseForwardedFor(V);
+    if Result <> '' then Exit;
+  end;
+
+  if FUseXForwardedFor then
+  begin
+    V := H.GetValue('X-Forwarded-For');
+    Result := ParseXForwardedFor(V);
+    if Result <> '' then Exit;
+  end;
+
+  if FUseXRealIP then
+  begin
+    V := H.GetValue('X-Real-IP');
+    Result := NormalizeIPLiteral(V);
+    if Result <> '' then Exit;
+  end;
+end;
+
 procedure THTTPServer.ParseRequestLine(const Head: ansistring;
   const ClientAddr: string; UseTLS: boolean; out R: TRequest);
 var
@@ -3344,11 +4032,12 @@ var
   TE, CL: string;
   TEParts, Parts: TStringArray;
   K: integer;
+  RealIP: string;
 begin
   if Assigned(R) then
     FreeAndNil(R);
   R := TRequest.Create;
-  R.RemoteAddr := ClientAddr;
+  R.RemoteAddr := ClientAddr; // default: socket remote
   R.TLS := UseTLS;
 
   Lines := TStringList.Create;
@@ -3395,6 +4084,14 @@ begin
       R.ContentLength := StrToInt64Def(CL, -1)
     else
       R.ContentLength := -1;
+
+    // If behind trusted proxy, override RemoteAddr from headers
+    if IsTrustedProxyRemote(ClientAddr) then
+    begin
+      RealIP := ExtractRealIPFromHeaders(R.Header);
+      if RealIP <> '' then
+        R.RemoteAddr := RealIP;
+    end;
 
   finally
     Lines.Free;
@@ -3726,8 +4423,13 @@ begin
   if Conn^.State = csClosed then Exit;
 
   {$IFDEF LINUX}
-  if FEpollFd >= 0 then
-    RemoveFromEpoll(Conn^.Sock);
+  // Only remove from epoll if it's the global instance (RunEpollLoop) or we need to manage local EpollFd
+  // In multi-worker mode (RunEpollWorker), CloseConnection is called from CheckConnectionTimeouts (global list)
+  // or HandleEpollRead/Write (worker thread).
+  // Since EpollFd is local to the worker thread, we cannot remove it here easily without knowing the EpollFd.
+  // However, close(sock) removes it from epoll automatically.
+  // So explicit epoll_ctl(DEL) is not strictly required on close, but good for cleanliness if we have the fd.
+  // Since we don't have EpollFd here in CloseConnection, we rely on socket close.
   {$ENDIF}
 
   {$IFDEF ENABLE_HTTP2}
@@ -3793,9 +4495,16 @@ begin
   Conn^.IOContext := nil;
   {$ENDIF}
 
-  FConnections.Remove(Conn);
+  // Patch 2: Thread-safe removal
+  FConnectionsLock.Enter;
+  try
+    FConnections.Remove(Conn);
+    Dec(FActiveConnections);
+  finally
+    FConnectionsLock.Leave;
+  end;
+
   Dispose(Conn);
-  DecConnections;
 end;
 
 procedure THTTPServer.IncConnections;
@@ -3917,25 +4626,19 @@ end;
 
 procedure THTTPServer.ListenAndServe(const Addr: string);
 var
+  Port: word;
+  Host: string;
+  UseIPv6: boolean;
+  W: integer;
+  {$IFDEF WINDOWS}
   ClientSock: integer;
   Sin: TSockAddrIn;
   Sin6: sockaddr_in6;
-  Port: word;
   OptVal: integer;
   ClientAddrStr: string;
   Conn: PClientConnection;
-  UseIPv6: boolean;
-  Host: string;
-
-  {$IFDEF LINUX}
-  Event: epoll_event;
-  {$ENDIF}
-
-  {$IFDEF WINDOWS}
   TV: TTimeVal;
   FDS: TFDSet;
-  IOCPThread: TThread;
-
   ClientSS: sockaddr_storage;
   ClientLen: Integer;
   {$ENDIF}
@@ -3950,87 +4653,6 @@ begin
 
   UseIPv6 := (Pos(':', Host) > 0) or (Pos('%', Host) > 0);
 
-  {$IFDEF WINDOWS}
-  if UseIPv6 then
-    FServerSock := socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP)
-  else
-    FServerSock := socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  {$ELSE}
-  if UseIPv6 then
-    FServerSock := fpsocket(AF_INET6, SOCK_STREAM, 0)
-  else
-    FServerSock := fpsocket(AF_INET, SOCK_STREAM, 0);
-  {$ENDIF}
-
-  if FServerSock = -1 then
-    raise Exception.Create('Socket creation failed');
-
-  OptVal := 1;
-  {$IFDEF WINDOWS}
-  setsockopt(TSocket(FServerSock), SOL_SOCKET, SO_REUSEADDR, @OptVal, SizeOf(OptVal));
-  {$ELSE}
-  fpsetsockopt(FServerSock, SOL_SOCKET, SO_REUSEADDR, @OptVal, SizeOf(OptVal));
-  {$ENDIF}
-
-  {$IFDEF LINUX}
-  if UseIPv6 then
-  begin
-    OptVal := 0; // 0 = allow v4-mapped on some systems
-    fpsetsockopt(FServerSock, IPPROTO_IPV6, IPV6_V6ONLY, @OptVal, SizeOf(OptVal));
-  end;
-  {$ENDIF}
-
-  if UseIPv6 then
-  begin
-    FillChar(Sin6, SizeOf(Sin6), 0);
-    Sin6.sin6_family := AF_INET6;
-    Sin6.sin6_port := htons(Port);
-
-    if (Host <> '') and (Host <> '*') then
-      Sin6.sin6_addr := StrToNetAddr6(Host);
-
-    {$IFDEF WINDOWS}
-    if bind(TSocket(FServerSock), PSockAddr(@Sin6), SizeOf(Sin6)) = SOCKET_ERROR then
-      raise Exception.Create('Bind failed');
-    {$ELSE}
-    if fpbind(FServerSock, @Sin6, SizeOf(Sin6)) = -1 then
-      raise Exception.Create('Bind failed');
-    {$ENDIF}
-  end
-  else
-  begin
-    FillChar(Sin, SizeOf(Sin), 0);
-    Sin.sin_family := AF_INET;
-    Sin.sin_port := htons(Port);
-
-    if (Host = '') or (Host = '*') then
-      Sin.sin_addr.s_addr := INADDR_ANY
-    else
-      Sin.sin_addr :=
-    {$IFDEF MSWINDOWS}
-        StrToNetAddrWin(Host)
-    {$ELSE}
-StrToNetAddr(Host)
-    {$ENDIF}
-    ;
-
-    {$IFDEF WINDOWS}
-    if bind(TSocket(FServerSock), PSockAddr(@Sin), SizeOf(Sin)) = SOCKET_ERROR then
-      raise Exception.Create('Bind failed');
-    {$ELSE}
-    if fpbind(FServerSock, @Sin, SizeOf(Sin)) = -1 then
-      raise Exception.Create('Bind failed');
-    {$ENDIF}
-  end;
-
-  {$IFDEF WINDOWS}
-  if listen(TSocket(FServerSock), SOMAXCONN) = SOCKET_ERROR then
-    raise Exception.Create('Listen failed');
-  {$ELSE}
-  if fplisten(FServerSock, 128) = -1 then
-    raise Exception.Create('Listen failed');
-  {$ENDIF}
-
   if (Host = '') or (Host = '*') then
     WriteLn('HTTP server listening on http://localhost:', Port)
   else
@@ -4038,23 +4660,73 @@ StrToNetAddr(Host)
   WriteLn('Press Ctrl+C to stop');
 
   {$IFDEF LINUX}
-  FServerIsTLS := False;
-  InitEpoll;
-  SysSetNonBlocking(FServerSock, True);
+  // Multi-worker: each worker creates its own socket with SO_REUSEPORT
+  if FWorkerCount <= 0 then FWorkerCount := 1;
+  SetLength(FWorkers, FWorkerCount);
+  for W := 0 to FWorkerCount-1 do
+    FWorkers[W] := TEpollWorkerThread.Create(Self, Host, Port, UseIPv6, False);
 
-  FillChar(Event, SizeOf(Event), 0);
-  Event.events := EPOLLIN;
-  Event.data.fd := FServerSock;
+  // Main thread waits for shutdown signal
+  while not ShutdownRequested do
+    Sleep(200);
 
-  if epoll_ctl(FEpollFd, EPOLL_CTL_ADD, FServerSock, @Event) < 0 then
-    raise Exception.Create('Failed to add listen socket to epoll');
-
-  RunEpollLoop;
+  // Stop all workers
+  for W := 0 to High(FWorkers) do
+  begin
+    if Assigned(FWorkers[W]) then
+    begin
+      FWorkers[W].WaitFor;
+      FreeAndNil(FWorkers[W]);
+    end;
+  end;
   {$ENDIF}
 
   {$IFDEF WINDOWS}
+  // Windows: single socket with IOCP
+  if UseIPv6 then
+    FServerSock := socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP)
+  else
+    FServerSock := socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+
+  if FServerSock = -1 then
+    raise Exception.Create('Socket creation failed');
+
+  OptVal := 1;
+  setsockopt(TSocket(FServerSock), SOL_SOCKET, SO_REUSEADDR, @OptVal, SizeOf(OptVal));
+
+  if UseIPv6 then
+  begin
+    FillChar(Sin6, SizeOf(Sin6), 0);
+    Sin6.sin6_family := AF_INET6;
+    Sin6.sin6_port := htons(Port);
+    if (Host <> '') and (Host <> '*') then
+      Sin6.sin6_addr := StrToNetAddr6(Host);
+
+    if bind(TSocket(FServerSock), PSockAddr(@Sin6), SizeOf(Sin6)) = SOCKET_ERROR then
+      raise Exception.CreateFmt('Bind failed: %d', [WSAGetLastError]);
+  end
+  else
+  begin
+    FillChar(Sin, SizeOf(Sin), 0);
+    Sin.sin_family := AF_INET;
+    Sin.sin_port := htons(Port);
+    if (Host = '') or (Host = '*') then
+      Sin.sin_addr.s_addr := INADDR_ANY
+    else
+      Sin.sin_addr := StrToNetAddrWin(Host);
+
+    if bind(TSocket(FServerSock), PSockAddr(@Sin), SizeOf(Sin)) = SOCKET_ERROR then
+      raise Exception.CreateFmt('Bind failed: %d', [WSAGetLastError]);
+  end;
+
+  if listen(TSocket(FServerSock), SOMAXCONN) = SOCKET_ERROR then
+    raise Exception.Create('Listen failed');
+
   InitIOCP;
-  IOCPThread := TIOCPLoopThread.Create(Self);
+  if FWorkerCount <= 0 then FWorkerCount := 1;
+  SetLength(FWorkers, FWorkerCount);
+  for W := 0 to FWorkerCount-1 do
+    FWorkers[W] := TIOCPLoopThread.Create(Self);
 
   try
     while not ShutdownRequested do
@@ -4068,8 +4740,6 @@ StrToNetAddr(Host)
       begin
         FillChar(ClientSS, SizeOf(ClientSS), 0);
         ClientLen := SizeOf(ClientSS);
-
-        // ВАЖНО: accept получает sockaddr* и длину именно sockaddr_storage
         ClientSock := accept(TSocket(FServerSock), PSockAddr(@ClientSS), @ClientLen);
 
         if ClientSock <> INVALID_SOCKET then
@@ -4111,15 +4781,20 @@ StrToNetAddr(Host)
           IncConnections;
           SysSetNonBlocking(ClientSock, True);
           AssociateWithIOCP(TSocket(ClientSock), Conn);
-
           PostRead(Conn);
         end;
       end;
     end;
   finally
     ShutdownRequested := True;
-    IOCPThread.WaitFor;
-    IOCPThread.Free;
+    for W := 0 to High(FWorkers) do
+    begin
+      if Assigned(FWorkers[W]) then
+      begin
+        FWorkers[W].WaitFor;
+        FreeAndNil(FWorkers[W]);
+      end;
+    end;
   end;
   {$ENDIF}
 
@@ -4127,28 +4802,21 @@ StrToNetAddr(Host)
   WriteLn('Server stopped gracefully');
 end;
 
-procedure THTTPServer.ListenAndServeTLS(const Addr: string;
-  const CertFile, KeyFile: string);
+procedure THTTPServer.ListenAndServeTLS(const Addr: string; const CertFile, KeyFile: string);
 var
+  Port: word;
+  Host: string;
+  UseIPv6: boolean;
+  I: Integer;
+  {$IFDEF WINDOWS}
   ClientSock: integer;
   Sin: TSockAddrIn;
   Sin6: sockaddr_in6;
-  Port: word;
   OptVal: integer;
   ClientAddrStr: string;
   Conn: PClientConnection;
-  UseIPv6: boolean;
-  Host: string;
-
-  {$IFDEF LINUX}
-  Event: epoll_event;
-  {$ENDIF}
-
-  {$IFDEF WINDOWS}
   TV: TTimeVal;
   FDS: TFDSet;
-  IOCPThread: TIOCPLoopThread;
-
   ClientSS: sockaddr_storage;
   ClientLen: Integer;
   {$ENDIF}
@@ -4170,87 +4838,6 @@ begin
 
   UseIPv6 := (Pos(':', Host) > 0) or (Pos('%', Host) > 0);
 
-  {$IFDEF WINDOWS}
-  if UseIPv6 then
-    FServerSock := socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP)
-  else
-    FServerSock := socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  {$ELSE}
-  if UseIPv6 then
-    FServerSock := fpsocket(AF_INET6, SOCK_STREAM, 0)
-  else
-    FServerSock := fpsocket(AF_INET, SOCK_STREAM, 0);
-  {$ENDIF}
-
-  if FServerSock = -1 then
-    raise Exception.Create('Socket creation failed');
-
-  OptVal := 1;
-  {$IFDEF WINDOWS}
-  setsockopt(TSocket(FServerSock), SOL_SOCKET, SO_REUSEADDR, @OptVal, SizeOf(OptVal));
-  {$ELSE}
-  fpsetsockopt(FServerSock, SOL_SOCKET, SO_REUSEADDR, @OptVal, SizeOf(OptVal));
-  {$ENDIF}
-
-  {$IFDEF LINUX}
-  if UseIPv6 then
-  begin
-    OptVal := 0; // 0 = allow v4-mapped on some systems
-    fpsetsockopt(FServerSock, IPPROTO_IPV6, IPV6_V6ONLY, @OptVal, SizeOf(OptVal));
-  end;
-  {$ENDIF}
-
-  if UseIPv6 then
-  begin
-    FillChar(Sin6, SizeOf(Sin6), 0);
-    Sin6.sin6_family := AF_INET6;
-    Sin6.sin6_port := htons(Port);
-
-    if (Host <> '') and (Host <> '*') then
-      Sin6.sin6_addr := StrToNetAddr6(Host);
-
-    {$IFDEF WINDOWS}
-    if bind(TSocket(FServerSock), PSockAddr(@Sin6), SizeOf(Sin6)) = SOCKET_ERROR then
-      raise Exception.Create('Bind failed');
-    {$ELSE}
-    if fpbind(FServerSock, @Sin6, SizeOf(Sin6)) = -1 then
-      raise Exception.Create('Bind failed');
-    {$ENDIF}
-  end
-  else
-  begin
-    FillChar(Sin, SizeOf(Sin), 0);
-    Sin.sin_family := AF_INET;
-    Sin.sin_port := htons(Port);
-
-    if (Host = '') or (Host = '*') then
-      Sin.sin_addr.s_addr := INADDR_ANY
-    else
-      Sin.sin_addr :=
-    {$IFDEF MSWINDOWS}
-        StrToNetAddrWin(Host)
-    {$ELSE}
-StrToNetAddr(Host)
-    {$ENDIF}
-    ;
-
-    {$IFDEF WINDOWS}
-    if bind(TSocket(FServerSock), PSockAddr(@Sin), SizeOf(Sin)) = SOCKET_ERROR then
-      raise Exception.Create('Bind failed');
-    {$ELSE}
-    if fpbind(FServerSock, @Sin, SizeOf(Sin)) = -1 then
-      raise Exception.Create('Bind failed');
-    {$ENDIF}
-  end;
-
-  {$IFDEF WINDOWS}
-  if listen(TSocket(FServerSock), SOMAXCONN) = SOCKET_ERROR then
-    raise Exception.Create('Listen failed');
-  {$ELSE}
-  if fplisten(FServerSock, 128) = -1 then
-    raise Exception.Create('Listen failed');
-  {$ENDIF}
-
   if Host = '' then
     WriteLn('HTTPS server listening on https://0.0.0.0:', Port)
   else
@@ -4258,24 +4845,73 @@ StrToNetAddr(Host)
   WriteLn('Press Ctrl+C to stop');
 
   {$IFDEF LINUX}
-  FServerIsTLS := True;
-  InitEpoll;
-  SysSetNonBlocking(FServerSock, True);
+  // Multi-worker: each worker creates its own socket with SO_REUSEPORT
+  if FWorkerCount <= 0 then FWorkerCount := 1;
+  SetLength(FWorkers, FWorkerCount);
+  for I := 0 to FWorkerCount - 1 do
+    FWorkers[I] := TEpollWorkerThread.Create(Self, Host, Port, UseIPv6, True);
 
-  FillChar(Event, SizeOf(Event), 0);
-  Event.events := EPOLLIN;
-  Event.data.fd := FServerSock;
+  // Main thread waits for shutdown
+  while not ShutdownRequested do
+    Sleep(200);
 
-  if epoll_ctl(FEpollFd, EPOLL_CTL_ADD, FServerSock, @Event) < 0 then
-    raise Exception.Create('Failed to add TLS listen socket to epoll');
-
-  RunEpollLoop;
+  for I := 0 to High(FWorkers) do
+  begin
+    if Assigned(FWorkers[I]) then
+    begin
+      FWorkers[I].WaitFor;
+      FreeAndNil(FWorkers[I]);
+    end;
+  end;
   {$ENDIF}
 
   {$IFDEF WINDOWS}
-  InitIOCP;
+  // Windows: single socket with IOCP
+  if UseIPv6 then
+    FServerSock := socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP)
+  else
+    FServerSock := socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
-  IOCPThread := TIOCPLoopThread.Create(Self);
+  if FServerSock = -1 then
+    raise Exception.Create('Socket creation failed');
+
+  OptVal := 1;
+  setsockopt(TSocket(FServerSock), SOL_SOCKET, SO_REUSEADDR, @OptVal, SizeOf(OptVal));
+
+  if UseIPv6 then
+  begin
+    FillChar(Sin6, SizeOf(Sin6), 0);
+    Sin6.sin6_family := AF_INET6;
+    Sin6.sin6_port := htons(Port);
+    if (Host <> '') and (Host <> '*') then
+      Sin6.sin6_addr := StrToNetAddr6(Host);
+
+    if bind(TSocket(FServerSock), PSockAddr(@Sin6), SizeOf(Sin6)) = SOCKET_ERROR then
+      raise Exception.CreateFmt('Bind failed: %d', [WSAGetLastError]);
+  end
+  else
+  begin
+    FillChar(Sin, SizeOf(Sin), 0);
+    Sin.sin_family := AF_INET;
+    Sin.sin_port := htons(Port);
+    if (Host = '') or (Host = '*') then
+      Sin.sin_addr.s_addr := INADDR_ANY
+    else
+      Sin.sin_addr := StrToNetAddrWin(Host);
+
+    if bind(TSocket(FServerSock), PSockAddr(@Sin), SizeOf(Sin)) = SOCKET_ERROR then
+      raise Exception.CreateFmt('Bind failed: %d', [WSAGetLastError]);
+  end;
+
+  if listen(TSocket(FServerSock), SOMAXCONN) = SOCKET_ERROR then
+    raise Exception.Create('Listen failed');
+
+  InitIOCP;
+  if FWorkerCount <= 0 then FWorkerCount := 1;
+  SetLength(FWorkers, FWorkerCount);
+  for I := 0 to FWorkerCount - 1 do
+    FWorkers[I] := TIOCPLoopThread.Create(Self);
+
   try
     while not ShutdownRequested do
     begin
@@ -4288,7 +4924,6 @@ StrToNetAddr(Host)
       begin
         FillChar(ClientSS, SizeOf(ClientSS), 0);
         ClientLen := SizeOf(ClientSS);
-
         ClientSock := accept(TSocket(FServerSock), PSockAddr(@ClientSS), @ClientLen);
 
         if ClientSock <> INVALID_SOCKET then
@@ -4315,7 +4950,7 @@ StrToNetAddr(Host)
             Continue;
           end;
 
-          SSLSetBio(Conn^.SSL, Conn^.ReadBIO, Conn^.WriteBIO);
+          SSLSetbio(Conn^.SSL, Conn^.ReadBIO, Conn^.WriteBIO);
           SSLSetAcceptState(Conn^.SSL);
           Conn^.HandshakeDone := False;
 
@@ -4353,15 +4988,20 @@ StrToNetAddr(Host)
           IncConnections;
           SysSetNonBlocking(ClientSock, True);
           AssociateWithIOCP(TSocket(ClientSock), Conn);
-
           PostRead(Conn);
         end;
       end;
     end;
   finally
     ShutdownRequested := True;
-    IOCPThread.WaitFor;
-    IOCPThread.Free;
+    for I := 0 to High(FWorkers) do
+    begin
+      if Assigned(FWorkers[I]) then
+      begin
+        FWorkers[I].WaitFor;
+        FreeAndNil(FWorkers[I]);
+      end;
+    end;
   end;
   {$ENDIF}
 
