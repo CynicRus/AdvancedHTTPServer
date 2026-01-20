@@ -366,8 +366,60 @@ begin
     Srv.Free;
   end;
 end.
-
 ```
+### AdvancedHTTPRouter: Features and Benefits
+
+**AdvancedHTTPRouter** is a high-performance, lightweight HTTP router designed specifically to integrate with your `AdvancedHTTPServer`. It provides a modern, structured way to define routes, handle requests, and organize application logic, inspired by popular frameworks like Gin (Go) or Echo.
+
+#### Key Features
+
+- **Efficient Routing with Radix Tree**  
+  Uses a  radix tree (trie) for route matching. This ensures very fast lookups , even with hundreds or thousands of routes. It handles:
+  - Static paths: `/users/list`
+  - Named parameters: `/users/:id` → access via `ctx.Param('id')`
+  - Wildcard catch-all: `/files/*path` → captures everything after
+
+- **HTTP Method Support**  
+  Dedicated methods for all standard verbs:
+  - `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`
+  - `Any()` for routes that respond to all methods
+  - Automatic fallback for `HEAD` to `GET` handlers if no explicit `HEAD` route exists
+
+- **Middleware System**  
+  - Global middleware via `router.Use(...)`
+  - Per-group middleware
+  - Middleware can call `ctx.Next()` to continue the chain or `ctx.Abort()` to stop it
+  - Middleware and handlers form a chain — you can attach multiple handlers per route
+
+- **Route Grouping**  
+  Powerful grouping with prefixes and nested groups:
+  ```pascal
+  api := router.Group('/api/v1');
+  api.Use(AuthMiddleware);
+  users := api.Group('/users');
+  users.GET('/:id', GetUserHandler);
+  ```
+  Groups automatically inherit prefixes and can have their own middleware.
+
+- **Convenient Context Object** (`THTTPRouterContext`)  
+  Passed to every handler:
+  - `Param(name)`, `Query(name)`, `Header(name)` for easy access
+  - Response helpers:
+    - `Status(code)`
+    - `Text(code, body)`
+    - `JSON(code, TJSONData)` or `JSONText(code, rawJSON)`
+  - `Next()` / `Abort()` for chain control
+  - Access to original `Request` and `ResponseWriter`
+
+- **Error Handling**  
+  - Custom 404 (Not Found) handlers via `NoRoute(...)`
+  - Custom 405 (Method Not Allowed) handlers via `NoMethod(...)`
+  - Defaults provided if not overridden
+
+- **Seamless Integration**  
+  Simply call `router.Mount()` to register the router as the main handler on your `THTTPServer`.
+
+
 
 Good luck and have fun building web applications in Pascal! 🚀
 
