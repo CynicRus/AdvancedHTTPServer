@@ -87,6 +87,82 @@ srv.Use(@AuthMiddleware);      // applies only to following routes
 srv.HandleFunc('/profile', ProfileHandler);     // protected
 srv.HandleFunc('/public',  PublicPageHandler);  // not protected!
 ```
+
+Using recovery middleware with router(AdvancedHTTPRecovery.pas)
+```pascal
+var
+  S: THTTPServer;
+  R: THTTPRouter;
+  Rec: THTTPRecovery;
+begin
+  Randomize;
+
+  S := THTTPServer.Create;
+  R := THTTPRouter.Create(S);
+  Rec := THTTPRecovery.Create;
+  try
+    Rec.ExposeExceptionMessage := False;
+    Rec.PreferJSON := True;
+
+    //This is router level
+    R.Use(Rec.RouterMiddleware);
+
+    // Routes...
+    // R.GET('/ping', [ ... ]);
+
+    R.Mount;
+    S.ListenAndServe('0.0.0.0:8080');
+  finally
+    Rec.Free;
+    R.Free;
+    S.Free;
+  end;
+end;
+```
+Using recovery middleware with server without router:
+```pascal
+uses
+  AdvancedHTTPServer, AdvancedHTTPRecovery;
+
+var
+  S: THTTPServer;
+  Rec: THTTPRecovery;
+begin
+  Randomize;
+
+  S := THTTPServer.Create;
+  Rec := THTTPRecovery.Create;
+  try
+    Rec.ExposeExceptionMessage := False; // production
+    Rec.AddRequestID := True;
+    S.Use(Rec.Middleware);
+
+    // Next routes / router.Mount etc.
+    // S.ListenAndServe('0.0.0.0:8080');
+  finally
+    Rec.Free;
+    S.Free;
+  end;
+end.;
+```
+Using CORS middleware:
+
+```pascal
+var
+  Cfg: TCorsConfig;
+begin
+  Cfg := CorsDefaultConfig;
+  Cfg.AllowAnyOrigin := False;
+  Cfg.AllowedOrigins := TStringArray.Create(
+    'https://*.example.com',
+    'http://localhost:*'
+  );
+  Cfg.AllowCredentials := True;
+
+  Router.Use(CorsMiddleware(Router, Cfg));
+end;
+```
+
 ### Trailers
 
 Send HTTP trailers (like gRPC):
