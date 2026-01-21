@@ -134,7 +134,6 @@ type
     FNoRoute: TRouterHandlerList;
     FNoMethod: TRouterHandlerList;
 
-    function NormalizePath(const S: string): string;
     function MethodFromString(const S: string): TRouterMethod;
 
     procedure AddRoute(AMethod: TRouterMethod; const Pattern: string;
@@ -149,9 +148,15 @@ type
 
     procedure DefaultNoRoute(C: TObject);
     procedure DefaultNoMethod(C: TObject);
+    // options autoprocessing
+    procedure WriteAutoOptions(Ctx: THTTPRouterContext; const AllowHeader: string);
   public
     constructor Create(AServer: THTTPServer);
     destructor Destroy; override;
+
+    function IsOptionsAutoResponsePossible(const ReqPath: string;
+             out AllowHeader: string; out HasAny: boolean): boolean;
+    function NormalizePath(const S: string): string;
 
     procedure Mount;
 
@@ -763,6 +768,102 @@ begin
   THTTPRouterContext(C).Text(405, '405 Method Not Allowed');
 end;
 
+function JoinAllow(const Methods: array of string): string;
+var
+  I: integer;
+begin
+  Result := '';
+  for I := 0 to High(Methods) do
+  begin
+    if Methods[I] = '' then Continue;
+    if Result <> '' then Result := Result + ', ';
+    Result := Result + Methods[I];
+  end;
+end;
+
+function THTTPRouter.IsOptionsAutoResponsePossible(const ReqPath: string;
+  out AllowHeader: string; out HasAny: boolean): boolean;
+const
+  MethodNames: array[0..6] of string = ('GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS');
+var
+  PathNorm: string;
+  M: TRouterMethod;
+  Node: TRadixNode;
+  Tmp: TStringList;
+  Present: array[0..6] of boolean;
+  L: array of string;
+  I, K: integer;
+
+  procedure Mark(const AMethod: TRouterMethod; Index: integer);
+  begin
+    Tmp := nil;
+    Node := FTrees[AMethod].GetValue(PathNorm, Tmp);
+    if Tmp <> nil then Tmp.Free;
+    if (Node <> nil) and (Length(Node.Handlers) > 0) then
+      Present[Index] := True;
+  end;
+
+begin
+  AllowHeader := '';
+  HasAny := False;
+  Result := False;
+
+  PathNorm := NormalizePath(ReqPath);
+
+  for I := 0 to High(Present) do Present[I] := False;
+
+  Mark(rmGET,    0);
+  Mark(rmPOST,   1);
+  Mark(rmPUT,    2);
+  Mark(rmPATCH,  3);
+  Mark(rmDELETE, 4);
+  Mark(rmHEAD,   5);
+  Mark(rmOPTIONS,6);
+
+  // HEAD fallback to GET: if there is no HEAD, but there is GET, we consider HEAD to be valid
+  if (not Present[5]) and Present[0] then
+    Present[5] := True;
+
+  // Is there any method at all for this path?
+  for I := 0 to High(Present) do
+    if Present[I] then
+    begin
+      HasAny := True;
+      Break;
+    end;
+
+  if not HasAny then Exit(False);
+
+  // According to the RFC, OPTIONS is usually always included for Allow.
+  // If there is no explicit OPTIONS, we will still respond to OPTIONS.
+  Present[6] := True;
+
+  // Compose Allow
+  SetLength(L, 0);
+  for I := 0 to High(Present) do
+    if Present[I] then
+    begin
+      K := Length(L);
+      SetLength(L, K + 1);
+      L[K] := MethodNames[I];
+    end;
+
+  AllowHeader := JoinAllow(L);
+  Result := True;
+end;
+
+procedure THTTPRouter.WriteAutoOptions(Ctx: THTTPRouterContext; const AllowHeader: string);
+begin
+  if not Ctx.W.HeadersSent then
+  begin
+    if AllowHeader <> '' then
+      Ctx.W.Header.SetValue('Allow', AllowHeader);
+
+    // Usually 204 without a body
+    Ctx.W.WriteHeader(204);
+  end;
+end;
+
 function THTTPRouter.MatchRoute(const ReqMethod, ReqPath: string;
   out RouteHandlers: TRouterHandlerList; out Params: TStringList;
   out MethodAllowed: boolean; out MatchedNode: TRadixNode): boolean;
@@ -772,6 +873,8 @@ var
   I: integer;
   TmpParams: TStringList;
   PathNorm: string;
+  AllowHeader: string;
+  HasAny: boolean;
 begin
   Result := False;
   MethodAllowed := False;
@@ -781,6 +884,39 @@ begin
 
   PathNorm := NormalizePath(ReqPath);
   M := MethodFromString(ReqMethod);
+
+  // AUTO OPTIONS:
+  // 1) If there is an explicit OPTIONS route, use it
+  // 2) Otherwise, generate an Allow route using existing methods and consider the match successful
+  if M = rmOPTIONS then
+  begin
+    Node := FTrees[rmOPTIONS].GetValue(PathNorm, Params);
+    if (Node <> nil) and (Length(Node.Handlers) > 0) then
+    begin
+      MatchedNode := Node;
+      SetLength(RouteHandlers, Length(Node.Handlers));
+      for I := 0 to High(Node.Handlers) do RouteHandlers[I] := Node.Handlers[I];
+      Exit(True);
+    end;
+    if Params <> nil then FreeAndNil(Params);
+
+    // no explicit OPTIONS - try auto-response
+    if IsOptionsAutoResponsePossible(PathNorm, AllowHeader, HasAny) and HasAny then
+    begin
+      MethodAllowed := True; // логически “путь существует”
+      MatchedNode := nil;
+      SetLength(RouteHandlers, 1);
+      RouteHandlers[0] := procedure(C: TObject)
+      begin
+        WriteAutoOptions(THTTPRouterContext(C), AllowHeader);
+      end;
+      Exit(True);
+    end;
+
+    // если путей нет — это 404 (не 405)
+    MethodAllowed := False;
+    Exit(False);
+  end;
 
   // HEAD falls back to GET if no explicit HEAD handler is found
   if M = rmHEAD then
