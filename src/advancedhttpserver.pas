@@ -139,6 +139,7 @@ const
 type
   THTTPServer = class;          // forward
   PClientConnection = ^TClientConnection; // forward
+   TResponseWriter = class; // forward
 
   {$IFDEF Linux}
   TSockAddrIn = sockaddr_in;
@@ -223,6 +224,8 @@ type
     procedure ParseCookies(out Cookies: TStringList);
   end;
 
+  TOnBeforeFinishResponse = reference to procedure(W: TResponseWriter; R: TRequest);
+
   { TResponseWriter }
   TResponseWriter = class
   public
@@ -246,10 +249,19 @@ type
     FBodyBuf: ansistring;
     FBuffered: boolean;
     FTrailersSent: boolean;
+    FOnBeforeFinish: TOnBeforeFinishResponse;
     procedure SendRaw(const Buf; Size: integer);
   public
     constructor Create(AConn: PClientConnection; AConnection: string);
     destructor Destroy; override;
+
+    function BufferedBody: AnsiString;
+    procedure SetBufferedBody(const S: AnsiString);
+
+    function StatusCode: Integer;
+    function IsChunked: Boolean;
+    procedure ForceChunked;
+
     function Header: THeader;
     function Trailer: TTrailer;
     procedure WriteHeader(Code: integer);
@@ -262,6 +274,7 @@ type
       SameSite: TCookieSameSite = ssLax);
     procedure Finish;
     function HeadersSent: boolean;
+    property OnBeforeFinish: TOnBeforeFinishResponse read FOnBeforeFinish write FOnBeforeFinish;
   end;
 
   THandlerFunc = reference to procedure(W: TResponseWriter; R: TRequest);
@@ -1701,6 +1714,39 @@ begin
   inherited Destroy;
 end;
 
+function TResponseWriter.BufferedBody: AnsiString;
+begin
+  Result := FBodyBuf;
+end;
+
+procedure TResponseWriter.SetBufferedBody(const S: AnsiString);
+begin
+  if FHeadersSent then
+    raise Exception.Create('Cannot change body after headers sent');
+  FBodyBuf := S;
+end;
+
+function TResponseWriter.StatusCode: Integer;
+begin
+  Result := FStatus;
+end;
+
+function TResponseWriter.IsChunked: Boolean;
+begin
+  Result := FChunked;
+end;
+
+procedure TResponseWriter.ForceChunked;
+begin
+  if FHeadersSent then Exit;
+  // remove CL and force chunked framing
+  FHeader.DeleteKey('Content-Length');
+  FHeader.DeleteKey('content-length');
+  FHeader.SetValue('Transfer-Encoding', 'chunked');
+  FChunked := True;
+  FExplicitCL := False;
+end;
+
 function TResponseWriter.Header: THeader;
 begin
   Result := FHeader;
@@ -2085,6 +2131,9 @@ begin
     FHeadersSent := True;
     Exit;
   end;
+
+  if Assigned(FOnBeforeFinish) then
+    FOnBeforeFinish(Self, FConn^.CurrentRequest);
 
   if (not FHeadersSent) and FBuffered then
   begin
