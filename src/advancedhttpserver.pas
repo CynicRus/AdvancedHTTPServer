@@ -51,7 +51,7 @@ uses
   JwaWinBase,
   {$ENDIF}
   SysUtils, StrUtils, Classes, FGL, DateUtils, syncobjs, patched_openssl,
-  ctypes, contnrs, Math
+  ctypes, contnrs, Math,
   {$IFDEF ENABLE_HTTP2}
   , nghttp2
   {$ENDIF}
@@ -139,7 +139,7 @@ const
 type
   THTTPServer = class;          // forward
   PClientConnection = ^TClientConnection; // forward
-   TResponseWriter = class; // forward
+  TResponseWriter = class; // forward
 
   {$IFDEF Linux}
   TSockAddrIn = sockaddr_in;
@@ -192,12 +192,47 @@ type
   TTrailer = class(THeader)
   end;
 
+  // Multipart Types
+  TMultipartFile = record
+    FieldName: string;
+    FileName: string;
+    ContentType: string;
+    Data: TBytes;
+  end;
+
+  TMultipartFileArray = array of TMultipartFile;
+
   { TRequest }
   TRequest = class
   private
     FCookiesParsed: boolean;
     FCookies: TStringList;
+
+    // Fields for caching
+    FQueryParsed: boolean;
+    FQueryParams: TStringList;
+
+    FPostFormParsed: boolean;
+    FPostFormParams: TStringList;
+
+    // Multipart: Fields for caching
+    FMultipartParsed: boolean;
+    FMultipartForm: TStringList;
+    FMultipartFiles: TMultipartFileArray;
+
     procedure EnsureCookiesParsed;
+    procedure EnsureQueryParsed;
+    procedure EnsurePostFormParsed;
+
+    //Multipart: Internal methods
+    procedure EnsureMultipartParsed;
+    function GetMultipartBoundary(const ContentType: string): string;
+    procedure ParseMultipartFormData(const Boundary: rawbytestring);
+
+    // Body caches
+    FBodyUTF8Cached: boolean;
+    FBodyUTF8: string;
+    procedure InvalidateBodyCaches;
   public
     Method: string;
     URL: string;
@@ -205,7 +240,10 @@ type
     RawQuery: string;
     Proto: string;
     Header: THeader;
+    // Backward-compat: old "Body" (string) kept, but source-of-truth is BodyBytes.
+    // Prefer using BodyBytes for binary and BodyUTF8 for text.
     Body: string;
+    BodyBytes: TBytes;
     Trailer: TTrailer;
     RemoteAddr: string;
     TLS: boolean;
@@ -214,6 +252,10 @@ type
     Context: TContext;
     constructor Create;
     destructor Destroy; override;
+
+    // Common parser
+    class procedure ParseURLEncodedInto(const Raw: string; Dest: TStringList); static;
+
     function QueryValue(const Key: string): string;
     procedure ParseQuery(out Params: TStringList);
     function PostFormValue(const Key: string): string;
@@ -222,6 +264,20 @@ type
     function CookieValue(const Name: string): string;
     function HasCookie(const Name: string): boolean;
     procedure ParseCookies(out Cookies: TStringList);
+
+    // Multipart: Public API
+    function IsMultipartFormData: boolean;
+    function MultipartValue(const Key: string): string;
+    function FileCount: integer;
+    function HasFile(const FieldName: string): boolean;
+    function FileByName(const FieldName: string; out F: TMultipartFile): boolean;
+    function SaveUploadedFileToTemp(const FieldName: string;
+      out TempPath: string): boolean;
+
+    // Body helpers
+    procedure ClearBody;
+    procedure AppendBody(const Buf; Len: integer);
+    function BodyUTF8: string;
   end;
 
   TOnBeforeFinishResponse = reference to procedure(W: TResponseWriter; R: TRequest);
@@ -255,11 +311,11 @@ type
     constructor Create(AConn: PClientConnection; AConnection: string);
     destructor Destroy; override;
 
-    function BufferedBody: AnsiString;
-    procedure SetBufferedBody(const S: AnsiString);
+    function BufferedBody: ansistring;
+    procedure SetBufferedBody(const S: ansistring);
 
-    function StatusCode: Integer;
-    function IsChunked: Boolean;
+    function StatusCode: integer;
+    function IsChunked: boolean;
     procedure ForceChunked;
 
     function Header: THeader;
@@ -274,7 +330,8 @@ type
       SameSite: TCookieSameSite = ssLax);
     procedure Finish;
     function HeadersSent: boolean;
-    property OnBeforeFinish: TOnBeforeFinishResponse read FOnBeforeFinish write FOnBeforeFinish;
+    property OnBeforeFinish: TOnBeforeFinishResponse
+      read FOnBeforeFinish write FOnBeforeFinish;
   end;
 
   THandlerFunc = reference to procedure(W: TResponseWriter; R: TRequest);
@@ -418,14 +475,14 @@ type
   THTTPServer = class
   private
     // Proxy / real IP settings
-    FBehindProxy: Boolean;
+    FBehindProxy: boolean;
     FTrustedProxyCIDRs: TStringList;
-    FUseForwardedHeaders: Boolean;
-    FUseXForwardedFor: Boolean;
-    FUseXRealIP: Boolean;
+    FUseForwardedHeaders: boolean;
+    FUseXForwardedFor: boolean;
+    FUseXRealIP: boolean;
 
     // Worker threads support
-    FWorkerCount: Integer;
+    FWorkerCount: integer;
     FWorkers: array of TThread;
 
 
@@ -464,13 +521,14 @@ type
     {$IFDEF ENABLE_HTTP2}
     function InitHTTP2Session(Conn: PClientConnection): Boolean;
     {$ENDIF}
-    function IsTrustedProxyRemote(const ClientAddr: string): Boolean;
+    function IsTrustedProxyRemote(const ClientAddr: string): boolean;
     function ExtractAddrHost(const ClientAddr: string): string;
     function NormalizeIPLiteral(const S: string): string;
-    function IPv4ToUInt32(const S: string; out V: Cardinal): Boolean;
-    function IPv6ToBytes(const S: string; out B: array of Byte): Boolean;
-    function ParseCIDR(const CIDR: string; out IsV6: Boolean; out Net4: Cardinal; out Prefix: Integer; out Net6: array of Byte): Boolean;
-    function IPInCIDR(const IP, CIDR: string): Boolean;
+    function IPv4ToUInt32(const S: string; out V: cardinal): boolean;
+    function IPv6ToBytes(const S: string; out B: array of byte): boolean;
+    function ParseCIDR(const CIDR: string; out IsV6: boolean;
+      out Net4: cardinal; out Prefix: integer; out Net6: array of byte): boolean;
+    function IPInCIDR(const IP, CIDR: string): boolean;
     function ExtractRealIPFromHeaders(const H: THeader): string;
     function ParseForwardedFor(const S: string): string;
     function ParseXForwardedFor(const S: string): string;
@@ -529,13 +587,15 @@ type
     property MaxBodyBytes: int64 read FMaxBodyBytes write FMaxBodyBytes;
 
     // Enable extracting real client IP from proxy headers (only for trusted proxies)
-    property BehindProxy: Boolean read FBehindProxy write FBehindProxy;
-    property TrustedProxyCIDRs: TStringList read FTrustedProxyCIDRs; // user populates list
-    property UseForwardedHeaders: Boolean read FUseForwardedHeaders write FUseForwardedHeaders;
-    property UseXForwardedFor: Boolean read FUseXForwardedFor write FUseXForwardedFor;
-    property UseXRealIP: Boolean read FUseXRealIP write FUseXRealIP;
+    property BehindProxy: boolean read FBehindProxy write FBehindProxy;
+    property TrustedProxyCIDRs: TStringList read FTrustedProxyCIDRs;
+    // user populates list
+    property UseForwardedHeaders: boolean read FUseForwardedHeaders
+      write FUseForwardedHeaders;
+    property UseXForwardedFor: boolean read FUseXForwardedFor write FUseXForwardedFor;
+    property UseXRealIP: boolean read FUseXRealIP write FUseXRealIP;
 
-    property WorkerCount: Integer read FWorkerCount write FWorkerCount;
+    property WorkerCount: integer read FWorkerCount write FWorkerCount;
   end;
 
 {$IFDEF WINDOWS}
@@ -570,6 +630,36 @@ var
   SSLInitialized: boolean = False;
 
 implementation
+
+procedure AppendBytes(var Dest: TBytes; const Buf; Len: integer);
+var
+  OldLen: SizeInt;
+begin
+  if Len <= 0 then Exit;
+  OldLen := Length(Dest);
+  SetLength(Dest, OldLen + Len);
+  Move(Buf, Dest[OldLen], Len);
+end;
+
+function BytesToRawByteString(const B: TBytes): rawbytestring;
+var
+  L: SizeInt;
+begin
+  L := Length(B);
+  SetLength(Result, L);
+  if L > 0 then
+    Move(B[0], Result[1], L);
+end;
+
+function UTF8BytesToString(const B: TBytes): string;
+var
+  R: rawbytestring;
+begin
+  if Length(B) = 0 then Exit('');
+  R := BytesToRawByteString(B);
+  // raw bytes (UTF-8) -> Unicode string
+  Result := UTF8ToUnicodeString(R);
+end;
 
 { TIOCPLoopThread }
 
@@ -831,14 +921,13 @@ function HTTP2OnDataChunkRecvCallback(session: Pnghttp2_session; flags: cuint;
                                       user_data: Pointer): cint; cdecl;
 var
   StreamData: PHTTP2StreamData;
-  Chunk: AnsiString;
 begin
   StreamData := PHTTP2StreamData(nghttp2_session_get_stream_user_data(session, stream_id));
 
   if Assigned(StreamData) then
   begin
-    SetString(Chunk, PAnsiChar(data), len);
-    StreamData^.Request.Body := StreamData^.Request.Body + string(Chunk);
+    if len > 0 then
+      StreamData^.Request.AppendBody(data^, len);
   end;
 
   Result := 0;
@@ -1149,9 +1238,7 @@ begin
     P := LastDelimiter(':', Addr);
     if P = 0 then Exit;
     Host := Copy(Addr, 1, P - 1);
-    Port := StrToWordDef(Copy(Addr, P + 2, MaxInt), 0); // Copy uses start index, length is MaxInt. Wait.
-    // Fix: LastDelimiter returns index.
-    // Copy(Addr, P+1, MaxInt)
+    Port := StrToWordDef(Copy(Addr, P + 1, MaxInt), 0);
     Port := StrToWordDef(Copy(Addr, P + 1, MaxInt), 0);
     if Port = 0 then Exit;
     Result := True;
@@ -1189,9 +1276,8 @@ begin
 
   {$IFDEF MSWINDOWS}
   // WinSock2 getnameinfo returns 0 on success, otherwise WSA error code
-  R := getnameinfo(SA, SALen, @HostBuf[0], NI_MAXHOST,
-    @ServBuf[0], NI_MAXSERV, NI_NUMERICHOST or
-    NI_NUMERICSERV);
+  R := getnameinfo(SA, SALen, @HostBuf[0], NI_MAXHOST, @ServBuf[0],
+    NI_MAXSERV, NI_NUMERICHOST or NI_NUMERICSERV);
   if R <> 0 then
     Exit('unknown');
   {$ELSE}
@@ -1213,6 +1299,12 @@ begin
     Result := Host + ':' + Serv;
 end;
 
+// Helper for body allowed status
+function BodyAllowedForStatus(Code: integer): boolean;
+begin
+  // RFC: 1xx, 204, 304 MUST NOT include message body
+  Result := not ((Code >= 100) and (Code < 200)) and (Code <> 204) and (Code <> 304);
+end;
 
 procedure ServeFile(W: TResponseWriter; R: TRequest; const FilePath: string);
 var
@@ -1497,17 +1589,102 @@ begin
   TLS := False;
   ContentLength := -1;
   SetLength(TransferEncoding, 0);
+  SetLength(BodyBytes, 0);
+  FBodyUTF8Cached := False;
+  FBodyUTF8 := '';
   FCookiesParsed := False;
   FCookies := nil;
+
+  // Init cache fields
+  FQueryParsed := False;
+  FQueryParams := nil;
+  FPostFormParsed := False;
+  FPostFormParams := nil;
+
+  // Multipart
+  FMultipartParsed := False;
+  FMultipartForm := nil;
+  SetLength(FMultipartFiles, 0);
 end;
 
 destructor TRequest.Destroy;
 begin
+  SetLength(BodyBytes, 0);
+  if Assigned(FQueryParams) then FQueryParams.Free;
+  if Assigned(FPostFormParams) then FPostFormParams.Free;
+  if Assigned(FMultipartForm) then FMultipartForm.Free;
+  SetLength(FMultipartFiles, 0);
+
   if Assigned(FCookies) then FCookies.Free;
   Context.Free;
   Trailer.Free;
   Header.Free;
   inherited Destroy;
+end;
+
+procedure TRequest.InvalidateBodyCaches;
+begin
+  FBodyUTF8Cached := False;
+  FBodyUTF8 := '';
+  // keep old Body string in sync in a conservative way:
+  // (do not auto-rebuild on every append; rebuild lazily when asked)
+end;
+
+procedure TRequest.ClearBody;
+begin
+  SetLength(BodyBytes, 0);
+  Body := '';
+  InvalidateBodyCaches;
+end;
+
+procedure TRequest.AppendBody(const Buf; Len: integer);
+begin
+  if Len <= 0 then Exit;
+  AppendBytes(BodyBytes, Buf, Len);
+  InvalidateBodyCaches;
+end;
+
+function TRequest.BodyUTF8: string;
+begin
+  if not FBodyUTF8Cached then
+  begin
+    FBodyUTF8 := UTF8BytesToString(BodyBytes);
+    FBodyUTF8Cached := True;
+    // backward-compat mirror:
+    Body := FBodyUTF8;
+  end;
+  Result := FBodyUTF8;
+end;
+
+// Unified URL-encoded parser
+class procedure TRequest.ParseURLEncodedInto(const Raw: string; Dest: TStringList);
+var
+  Pairs: TStringArray;
+  I, P: integer;
+  Key, Value: string;
+begin
+  if Dest = nil then Exit;
+  if Raw = '' then Exit;
+
+  // Unify behavior with query: support & and ; and allow "key" without '='
+  Pairs := Raw.Split(['&', ';']);
+  for I := 0 to High(Pairs) do
+  begin
+    if Pairs[I] = '' then Continue;
+
+    P := Pos('=', Pairs[I]);
+    if P > 0 then
+    begin
+      Key := URLDecode(Copy(Pairs[I], 1, P - 1));
+      Value := URLDecode(Copy(Pairs[I], P + 1, MaxInt));
+      Dest.Add(Key + '=' + Value);
+    end
+    else
+    begin
+      Key := URLDecode(Pairs[I]);
+      Dest.Add(Key + '=');
+    end;
+  end;
 end;
 
 function TRequest.HasChunkedEncoding: boolean;
@@ -1520,90 +1697,81 @@ begin
       Exit(True);
 end;
 
-procedure TRequest.ParseQuery(out Params: TStringList);
-var
-  Pairs: TStringArray;
-  I, P: integer;
-  Key, Value: string;
+procedure TRequest.EnsureQueryParsed;
 begin
-  Params := TStringList.Create;
-  if RawQuery = '' then Exit;
+  if FQueryParsed then Exit;
+  FQueryParsed := True;
 
-  Pairs := RawQuery.Split(['&', ';']);
-  for I := 0 to High(Pairs) do
+  if not Assigned(FQueryParams) then
   begin
-    if Pairs[I] = '' then Continue;
-    P := Pos('=', Pairs[I]);
-    if P > 0 then
-    begin
-      Key := URLDecode(Copy(Pairs[I], 1, P - 1));
-      Value := URLDecode(Copy(Pairs[I], P + 1, MaxInt));
-      Params.Add(Key + '=' + Value);
-    end
-    else
-      Params.Add(URLDecode(Pairs[I]) + '=');
-  end;
+    FQueryParams := TStringList.Create;
+    FQueryParams.NameValueSeparator := '=';
+    FQueryParams.StrictDelimiter := True;
+    FQueryParams.CaseSensitive := False;
+  end
+  else
+    FQueryParams.Clear;
+
+  ParseURLEncodedInto(RawQuery, FQueryParams);
+end;
+
+procedure TRequest.ParseQuery(out Params: TStringList);
+begin
+  EnsureQueryParsed;
+  Params := TStringList.Create;
+  Params.Assign(FQueryParams);
 end;
 
 function TRequest.QueryValue(const Key: string): string;
-var
-  Params: TStringList;
-  I: integer;
 begin
-  Result := '';
-  Params := TStringList.Create;
-  try
-    ParseQuery(Params);
-    I := Params.IndexOfName(Key);
-    if I >= 0 then
-      Result := Params.ValueFromIndex[I];
-  finally
-    Params.Free;
-  end;
+  EnsureQueryParsed;
+  Result := FQueryParams.Values[Key];
 end;
 
-procedure TRequest.ParsePostForm(out Params: TStringList);
+procedure TRequest.EnsurePostFormParsed;
 var
   CT: string;
-  Pairs: TStringArray;
-  I, P: integer;
-  Key, Value: string;
 begin
-  Params := TStringList.Create;
+  if FPostFormParsed then Exit;
+  FPostFormParsed := True;
+
+  if not Assigned(FPostFormParams) then
+  begin
+    FPostFormParams := TStringList.Create;
+    FPostFormParams.NameValueSeparator := '=';
+    FPostFormParams.StrictDelimiter := True;
+    FPostFormParams.CaseSensitive := False;
+  end
+  else
+    FPostFormParams.Clear;
+
   CT := LowerCase(Header.GetValue('content-type'));
 
   if Pos('application/x-www-form-urlencoded', CT) > 0 then
   begin
-    Pairs := Body.Split(['&']);
-    for I := 0 to High(Pairs) do
-    begin
-      if Pairs[I] = '' then Continue;
-      P := Pos('=', Pairs[I]);
-      if P > 0 then
-      begin
-        Key := URLDecode(Copy(Pairs[I], 1, P - 1));
-        Value := URLDecode(Copy(Pairs[I], P + 1, MaxInt));
-        Params.Add(Key + '=' + Value);
-      end;
-    end;
+    // Support both & and ; and include keys without '=' just like query parsing
+    ParseURLEncodedInto(BodyUTF8, FPostFormParams);
+  end
+  else if Pos('multipart/form-data', CT) > 0 then
+  begin
+    // PATCH Multipart: Integration
+    EnsureMultipartParsed;
+    if Assigned(FMultipartForm) then
+      FPostFormParams.Assign(FMultipartForm); // NOTE: only simple fields, not files
   end;
 end;
 
-function TRequest.PostFormValue(const Key: string): string;
-var
-  Params: TStringList;
-  I: integer;
+procedure TRequest.ParsePostForm(out Params: TStringList);
 begin
-  Result := '';
-  Params := nil;
-  try
-    ParsePostForm(Params);
-    I := Params.IndexOfName(Key);
-    if I >= 0 then
-      Result := Params.ValueFromIndex[I];
-  finally
-    Params.Free;
-  end;
+  EnsurePostFormParsed;
+  Params := TStringList.Create;
+  Params.Assign(FPostFormParams);
+end;
+
+function TRequest.PostFormValue(const Key: string): string;
+begin
+  EnsurePostFormParsed;
+  Result := FPostFormParams.Values[Key];
 end;
 
 procedure TRequest.EnsureCookiesParsed;
@@ -1683,6 +1851,352 @@ begin
   Cookies.Assign(FCookies);
 end;
 
+{ ---  Multipart Implementation --- }
+
+// Helper functions
+function FindBytes(const Haystack, Needle: rawbytestring;
+  StartPos: SizeInt = 1): SizeInt;
+var
+  HLen, NLen, I: SizeInt;
+begin
+  Result := 0;
+  HLen := Length(Haystack);
+  NLen := Length(Needle);
+  if (NLen = 0) or (HLen = 0) or (StartPos < 1) then Exit;
+  if (HLen - StartPos + 1) < NLen then Exit;
+
+  for I := StartPos to HLen - NLen + 1 do
+  begin
+    if CompareByte(Haystack[I], Needle[1], NLen) = 0 then
+      Exit(I);
+  end;
+end;
+
+function RBSFromBytes(const B: TBytes): rawbytestring;
+begin
+  Result := BytesToRawByteString(B);
+end;
+
+procedure AppendMultipartFile(var Arr: TMultipartFileArray; const F: TMultipartFile);
+var
+  L: integer;
+begin
+  L := Length(Arr);
+  SetLength(Arr, L + 1);
+  Arr[L] := F;
+end;
+
+function TRequest.IsMultipartFormData: boolean;
+var
+  CT: string;
+begin
+  CT := LowerCase(Header.GetValue('content-type'));
+  Result := Pos('multipart/form-data', CT) > 0;
+end;
+
+function TRequest.GetMultipartBoundary(const ContentType: string): string;
+var
+  CT, B: string;
+  P: SizeInt;
+begin
+  Result := '';
+  CT := ContentType;
+
+  // Find boundary=
+  P := Pos('boundary=', LowerCase(CT));
+  if P <= 0 then Exit('');
+
+  B := Copy(CT, P + Length('boundary='), MaxInt);
+  B := Trim(B);
+
+  // strip optional parameters after boundary
+  P := Pos(';', B);
+  if P > 0 then
+    B := Trim(Copy(B, 1, P - 1));
+
+  // strip optional quotes
+  if (Length(B) >= 2) and (B[1] = '"') and (B[Length(B)] = '"') then
+    B := Copy(B, 2, Length(B) - 2);
+
+  Result := B;
+end;
+
+procedure TRequest.EnsureMultipartParsed;
+var
+  CT, B: string;
+begin
+  if FMultipartParsed then Exit;
+  FMultipartParsed := True;
+
+  if not Assigned(FMultipartForm) then
+  begin
+    FMultipartForm := TStringList.Create;
+    FMultipartForm.NameValueSeparator := '=';
+    FMultipartForm.StrictDelimiter := True;
+    FMultipartForm.CaseSensitive := False;
+  end
+  else
+    FMultipartForm.Clear;
+
+  SetLength(FMultipartFiles, 0);
+
+  if not IsMultipartFormData then Exit;
+
+  CT := Header.GetValue('content-type');
+  B := GetMultipartBoundary(CT);
+  if B = '' then Exit;
+
+  ParseMultipartFormData(rawbytestring(B));
+end;
+
+procedure TRequest.ParseMultipartFormData(const Boundary: rawbytestring);
+var
+  BodyBytes: rawbytestring;
+  Delim, CloseDelim: rawbytestring;
+  P, NextP: SizeInt;
+  PartStart, PartEnd: SizeInt;
+  HeaderEnd: SizeInt;
+  PartHead, PartBody: rawbytestring;
+
+  HeadText: string;
+  SL: TStringList;
+  I, J: integer;
+  Line, Key, Val: string;
+
+  Disposition, NameVal, FileNameVal, ContentType: string;
+  EqPos: integer;
+
+  function GetHeaderValue(const HName: string): string;
+  var
+    K: string;
+    i: integer;
+  begin
+    Result := '';
+    K := LowerCase(HName);
+    for I := 0 to SL.Count - 1 do
+    begin
+      Line := SL[I];
+      J := Pos(':', Line);
+      if J <= 0 then Continue;
+      if LowerCase(Trim(Copy(Line, 1, J - 1))) = K then
+        Exit(Trim(Copy(Line, J + 1, MaxInt)));
+    end;
+  end;
+
+  function ExtractParam(const S, ParamName: string): string;
+  var
+    L, PN: string;
+    P0, P1: SizeInt;
+  begin
+    Result := '';
+    L := S;
+    PN := LowerCase(ParamName) + '=';
+    P0 := Pos(PN, LowerCase(L));
+    if P0 <= 0 then Exit('');
+    Result := Copy(L, P0 + Length(PN), MaxInt);
+    Result := Trim(Result);
+    // stop at ; if present
+    P1 := Pos(';', Result);
+    if P1 > 0 then Result := Trim(Copy(Result, 1, P1 - 1));
+    // strip quotes
+    if (Length(Result) >= 2) and (Result[1] = '"') and
+      (Result[Length(Result)] = '"') then
+      Result := Copy(Result, 2, Length(Result) - 2);
+  end;
+
+  procedure CopyRbsToBytes(const R: rawbytestring; out B: TBytes);
+  var
+    L: integer;
+  begin
+    L := Length(R);
+    SetLength(B, L);
+    if L > 0 then
+      Move(R[1], B[0], L);
+  end;
+
+  function TrimCRLFRightRBS(const R: rawbytestring): rawbytestring;
+  var
+    L: SizeInt;
+  begin
+    Result := R;
+    L := Length(Result);
+    // Remove trailing CRLF if present (part bodies are terminated before boundary with CRLF)
+    if (L >= 2) and (Result[L - 1] = #13) and (Result[L] = #10) then
+      SetLength(Result, L - 2);
+  end;
+
+var
+  MPF: TMultipartFile;
+  RawPartBody: rawbytestring;
+begin
+  BodyBytes := RBSFromBytes(Self.BodyBytes);
+
+  Delim := rawbytestring('--') + Boundary;
+  CloseDelim := Delim + rawbytestring('--');
+
+  // The body should start with --boundary
+  P := FindBytes(BodyBytes, Delim, 1);
+  if P = 0 then Exit;
+
+  // Move to after first boundary line
+  // It can be "--boundary\r\n"
+  P := P + Length(Delim);
+
+  // If immediately "--" then it's empty multipart
+  if FindBytes(BodyBytes, rawbytestring('--'), P) = P then Exit;
+
+  // Expect CRLF
+  if FindBytes(BodyBytes, rawbytestring(#13#10), P) = P then
+    Inc(P, 2);
+
+  SL := TStringList.Create;
+  try
+    while True do
+    begin
+      // Each part: headers end with \r\n\r\n
+      HeaderEnd := FindBytes(BodyBytes, rawbytestring(#13#10#13#10), P);
+      if HeaderEnd = 0 then Break;
+
+      PartHead := Copy(BodyBytes, P, HeaderEnd - P);
+      PartStart := HeaderEnd + 4;
+
+      // Find next boundary delimiter preceded by \r\n
+      // Search for \r\n--boundary
+      NextP := FindBytes(BodyBytes, rawbytestring(#13#10) + Delim, PartStart);
+      if NextP = 0 then Break;
+
+      PartEnd := NextP; // points to CRLF before boundary
+      PartBody := Copy(BodyBytes, PartStart, PartEnd - PartStart);
+
+      // Advance P to after "\r\n--boundary"
+      P := NextP + 2 + Length(Delim);
+
+      // Determine if it's closing boundary
+      if FindBytes(BodyBytes, rawbytestring('--'), P) = P then
+      begin
+        // closing
+        // optional \r\n after closing boundary; ignore
+        // process this part first, then break after
+      end
+      else
+      begin
+        // normal boundary, expect \r\n
+        if FindBytes(BodyBytes, rawbytestring(#13#10), P) = P then
+          Inc(P, 2);
+      end;
+
+      // Parse headers
+      SL.Text := StringReplace(string(PartHead), #13#10, #10, [rfReplaceAll]);
+
+      Disposition := GetHeaderValue('Content-Disposition');
+      ContentType := GetHeaderValue('Content-Type');
+
+      NameVal := ExtractParam(Disposition, 'name');
+      FileNameVal := ExtractParam(Disposition, 'filename');
+
+      // part body can end with CRLF; we already cut before CRLF--boundary, but many senders include trailing CRLF
+      RawPartBody := TrimCRLFRightRBS(PartBody);
+
+      if NameVal <> '' then
+      begin
+        if FileNameVal <> '' then
+        begin
+          FillChar(MPF, SizeOf(MPF), 0);
+          MPF.FieldName := NameVal;
+          MPF.FileName := FileNameVal;
+          MPF.ContentType := ContentType;
+          CopyRbsToBytes(RawPartBody, MPF.Data);
+          AppendMultipartFile(FMultipartFiles, MPF);
+        end
+        else
+        begin
+          // Normal field: interpret as text
+          // multipart fields are not urlencoded.
+          // Interpret field body as UTF-8 per your requirement.
+          FMultipartForm.Values[NameVal] := UTF8ToUnicodeString(RawPartBody);
+        end;
+      end;
+
+      // If closing boundary, stop
+      if FindBytes(BodyBytes, rawbytestring('--'), P) = P then
+        Break;
+    end;
+
+  finally
+    SL.Free;
+  end;
+end;
+
+function TRequest.MultipartValue(const Key: string): string;
+begin
+  EnsureMultipartParsed;
+  if Assigned(FMultipartForm) then
+    Result := FMultipartForm.Values[Key]
+  else
+    Result := '';
+end;
+
+function TRequest.FileCount: integer;
+begin
+  EnsureMultipartParsed;
+  Result := Length(FMultipartFiles);
+end;
+
+function TRequest.HasFile(const FieldName: string): boolean;
+var
+  Dummy: TMultipartFile;
+begin
+  Result := FileByName(FieldName, Dummy);
+end;
+
+function TRequest.FileByName(const FieldName: string; out F: TMultipartFile): boolean;
+var
+  I: integer;
+begin
+  EnsureMultipartParsed;
+  Result := False;
+  FillChar(F, SizeOf(F), 0);
+  for I := 0 to High(FMultipartFiles) do
+    if SameText(FMultipartFiles[I].FieldName, FieldName) then
+    begin
+      F := FMultipartFiles[I];
+      Exit(True);
+    end;
+end;
+
+function TRequest.SaveUploadedFileToTemp(const FieldName: string;
+  out TempPath: string): boolean;
+var
+  F: TMultipartFile;
+  FN, Dir: string;
+  FS: TFileStream;
+begin
+  Result := False;
+  TempPath := '';
+
+  if not FileByName(FieldName, F) then Exit(False);
+  if Length(F.Data) = 0 then Exit(False);
+
+  Dir := GetTempDir(False);
+  if Dir = '' then Dir := '.';
+
+  // Generate a safe-ish filename
+  FN := 'upload_' + FormatDateTime('yyyymmdd_hhnnss_zzz', Now) + '_' +
+    IntToStr(Random(1000000));
+  if ExtractFileExt(F.FileName) <> '' then
+    FN := FN + ExtractFileExt(F.FileName);
+
+  TempPath := IncludeTrailingPathDelimiter(Dir) + FN;
+
+  FS := TFileStream.Create(TempPath, fmCreate);
+  try
+    FS.WriteBuffer(F.Data[0], Length(F.Data));
+    Result := True;
+  finally
+    FS.Free;
+  end;
+end;
+
 { --- TResponseWriter --- }
 
 constructor TResponseWriter.Create(AConn: PClientConnection; AConnection: string);
@@ -1714,24 +2228,24 @@ begin
   inherited Destroy;
 end;
 
-function TResponseWriter.BufferedBody: AnsiString;
+function TResponseWriter.BufferedBody: ansistring;
 begin
   Result := FBodyBuf;
 end;
 
-procedure TResponseWriter.SetBufferedBody(const S: AnsiString);
+procedure TResponseWriter.SetBufferedBody(const S: ansistring);
 begin
   if FHeadersSent then
     raise Exception.Create('Cannot change body after headers sent');
   FBodyBuf := S;
 end;
 
-function TResponseWriter.StatusCode: Integer;
+function TResponseWriter.StatusCode: integer;
 begin
   Result := FStatus;
 end;
 
-function TResponseWriter.IsChunked: Boolean;
+function TResponseWriter.IsChunked: boolean;
 begin
   Result := FChunked;
 end;
@@ -1861,7 +2375,7 @@ begin
     end
     else
     begin
-      Ret := SysSend(FSocket, P[Sent], Size - Sent, 0);
+      Ret := SysSend(FSocket, Pointer(P + Sent)^, Size - Sent, 0);
       if Ret <= 0 then
         raise Exception.Create('send failed');
     end;
@@ -1888,59 +2402,73 @@ var
 begin
   if FHeadersSent then Exit;
 
-  // 101 Switching Protocols: minimal headers only
-  if FStatus = 101 then
+  // Check if body is allowed for status
+  if not BodyAllowedForStatus(FStatus) then
   begin
-    if FHeader.GetValue('Upgrade') = '' then
-      raise Exception.Create('101 Switching Protocols requires Upgrade header');
-
-    FStatusText := GetStatusText(FStatus);
-    Headers := 'HTTP/1.1 ' + IntToStr(FStatus) + ' ' + FStatusText + #13#10;
-
-    for I := 0 to FHeader.Count - 1 do
-      Headers := Headers + Trim(FHeader[I]) + #13#10;
-
-    Headers := Headers + #13#10;
-    SendRaw(Headers[1], Length(Headers));
-    FHeadersSent := True;
-    FConnection := 'upgrade';
-    Exit;
-  end;
-
-  if FHeader.GetValue('date') = '' then
-    FHeader.SetValue('Date', FormatHTTPDate);
-
-  if FHeader.GetValue('connection') = '' then
-    FHeader.SetValue('Connection', FConnection);
-
-  if FHeader.GetValue('content-type') = '' then
-    FHeader.SetValue('Content-Type', 'text/plain; charset=utf-8');
-
-  CL := FHeader.GetValue('content-length');
-  HasCL := CL <> '';
-
-  if HasCL then
-  begin
+    // No body => no chunked framing, no CL needed
     FChunked := False;
-    FExplicitCL := True;
+    FExplicitCL := True; // treat as explicit "no body"
+    FHeader.DeleteKey('Transfer-Encoding');
+    FHeader.DeleteKey('transfer-encoding');
+    FHeader.DeleteKey('Content-Length');
+    FHeader.DeleteKey('content-length');
   end
   else
   begin
-    FChunked := (LowerCase(FConnection) = 'keep-alive');
-    if FChunked then
+    // 101 Switching Protocols: minimal headers only
+    if FStatus = 101 then
     begin
-      FHeader.SetValue('Transfer-Encoding', 'chunked');
+      if FHeader.GetValue('Upgrade') = '' then
+        raise Exception.Create('101 Switching Protocols requires Upgrade header');
 
-      if FTrailer.Count > 0 then
+      FStatusText := GetStatusText(FStatus);
+      Headers := 'HTTP/1.1 ' + IntToStr(FStatus) + ' ' + FStatusText + #13#10;
+
+      for I := 0 to FHeader.Count - 1 do
+        Headers := Headers + Trim(FHeader[I]) + #13#10;
+
+      Headers := Headers + #13#10;
+      SendRaw(Headers[1], Length(Headers));
+      FHeadersSent := True;
+      FConnection := 'upgrade';
+      Exit;
+    end;
+
+    if FHeader.GetValue('date') = '' then
+      FHeader.SetValue('Date', FormatHTTPDate);
+
+    if FHeader.GetValue('connection') = '' then
+      FHeader.SetValue('Connection', FConnection);
+
+    if FHeader.GetValue('content-type') = '' then
+      FHeader.SetValue('Content-Type', 'text/plain; charset=utf-8');
+
+    CL := FHeader.GetValue('content-length');
+    HasCL := CL <> '';
+
+    if HasCL then
+    begin
+      FChunked := False;
+      FExplicitCL := True;
+    end
+    else
+    begin
+      FChunked := (LowerCase(FConnection) = 'keep-alive');
+      if FChunked then
       begin
-        TrailerNames := '';
-        for I := 0 to FTrailer.Count - 1 do
+        FHeader.SetValue('Transfer-Encoding', 'chunked');
+
+        if FTrailer.Count > 0 then
         begin
-          if I > 0 then TrailerNames := TrailerNames + ', ';
-          TrailerNames := TrailerNames + FTrailer.Names[I];
+          TrailerNames := '';
+          for I := 0 to FTrailer.Count - 1 do
+          begin
+            if I > 0 then TrailerNames := TrailerNames + ', ';
+            TrailerNames := TrailerNames + FTrailer.Names[I];
+          end;
+          if TrailerNames <> '' then
+            FHeader.SetValue('Trailer', TrailerNames);
         end;
-        if TrailerNames <> '' then
-          FHeader.SetValue('Trailer', TrailerNames);
       end;
     end;
   end;
@@ -2125,6 +2653,17 @@ var
   I: integer;
   TrailerData: string;
 begin
+  // Prohibit sending body for 1xx, 204, 304
+  if not BodyAllowedForStatus(FStatus) then
+  begin
+    // Ensure headers are sent, but never send body/chunk terminators/trailers
+    if not FHeadersSent then
+      SendHeadersIfNeeded;
+    FBodyBuf := '';
+    FTrailersSent := True;
+    Exit;
+  end;
+
   // 101 Switching Protocols should not send chunked termination
   if FStatus = 101 then
   begin
@@ -2770,7 +3309,9 @@ begin
             Exit;
           end;
 
-          Conn^.CurrentRequest.Body := string(PendingReq^.Body);
+          Conn^.CurrentRequest.ClearBody;
+          if Length(PendingReq^.Body) > 0 then
+            Conn^.CurrentRequest.AppendBody(PendingReq^.Body[1], Length(PendingReq^.Body));
 
           if (Conn^.CurrentRequest.ContentLength > 0) and
             (not Conn^.CurrentRequest.HasChunkedEncoding) then
@@ -2791,15 +3332,31 @@ begin
             end;
           end;
 
+          // Chunked error handling (Initial)
           if Conn^.CurrentRequest.HasChunkedEncoding then
           begin
             Conn^.State := csReadingChunks;
             Conn^.ChunkBytesRemaining := 0;
-            if not ReadChunkedBody(Conn) then
-            begin
-              Dispose(PendingReq);
-              Break;
+            try
+              if not ReadChunkedBody(Conn) then
+              begin
+                Dispose(PendingReq);
+                Break; // need more data
+              end;
+            except
+              on E: Exception do
+              begin
+                // Map chunked parsing errors to 400/413
+                if Pos('Body too large', E.Message) > 0 then
+                  SendErrorResponse(Conn, 413, 'Payload Too Large')
+                else
+                  SendErrorResponse(Conn, 400, 'Bad Request');
+                CloseConnection(Conn);
+                Dispose(PendingReq);
+                Exit;
+              end;
             end;
+
             ProcessRequest(Conn);
             Conn^.State := csReadingHeaders;
           end
@@ -2832,9 +3389,8 @@ begin
 
       if Length(Conn^.PlainInBuf) >= Conn^.BodyBytesRemaining then
       begin
-        Conn^.CurrentRequest.Body :=
-          Conn^.CurrentRequest.Body + string(Copy(Conn^.PlainInBuf,
-          1, Conn^.BodyBytesRemaining));
+        if Conn^.BodyBytesRemaining > 0 then
+          Conn^.CurrentRequest.AppendBody(Conn^.PlainInBuf[1], Conn^.BodyBytesRemaining);
         Delete(Conn^.PlainInBuf, 1, Conn^.BodyBytesRemaining);
 
         Inc(Conn^.BodyBytesRead, Conn^.BodyBytesRemaining);
@@ -2848,8 +3404,8 @@ begin
       end
       else
       begin
-        Conn^.CurrentRequest.Body :=
-          Conn^.CurrentRequest.Body + string(Conn^.PlainInBuf);
+        if Length(Conn^.PlainInBuf) > 0 then
+          Conn^.CurrentRequest.AppendBody(Conn^.PlainInBuf[1], Length(Conn^.PlainInBuf));
 
         Inc(Conn^.BodyBytesRead, Length(Conn^.PlainInBuf));
 
@@ -2858,15 +3414,28 @@ begin
       end;
     end;
 
+    // Chunked error handling (Continuation)
     csReadingChunks:
     begin
-      if ReadChunkedBody(Conn) then
-      begin
-        ProcessRequest(Conn);
-        Conn^.State := csReadingHeaders;
+      try
+        if ReadChunkedBody(Conn) then
+        begin
+          ProcessRequest(Conn);
+          Conn^.State := csReadingHeaders;
 
-        if Length(Conn^.PlainInBuf) > 0 then
-          ProcessRequestsFromBuffer(Conn);
+          if Length(Conn^.PlainInBuf) > 0 then
+            ProcessRequestsFromBuffer(Conn);
+        end;
+      except
+        on E: Exception do
+        begin
+          if Pos('Body too large', E.Message) > 0 then
+            SendErrorResponse(Conn, 413, 'Payload Too Large')
+          else
+            SendErrorResponse(Conn, 400, 'Bad Request');
+          CloseConnection(Conn);
+          Exit;
+        end;
       end;
     end;
   end;
@@ -3288,56 +3857,6 @@ var
     if epoll_ctl(EpollFd, EPOLL_CTL_ADD, Sock, @E) < 0 then
       WriteLn('epoll_ctl ADD failed for socket ', Sock);
   end;
-
-  {procedure ModConnEpoll(Sock: Integer; C: PClientConnection; EventsMask: Cardinal);
-  var E: epoll_event;
-  begin
-    FillChar(E, SizeOf(E), 0);
-    E.events := EventsMask or EPOLLET;
-    E.data.ptr := C;
-    if epoll_ctl(EpollFd, EPOLL_CTL_MOD, Sock, @E) < 0 then
-      WriteLn('epoll_ctl MOD failed for socket ', Sock, ' errno=', fpgeterrno);
-  end;
-
-  procedure EnableWrite(C: PClientConnection);
-  begin
-    ModConnEpoll(C^.Sock, C, EPOLLIN or EPOLLOUT);
-  end;
-
-  procedure DisableWrite(C: PClientConnection);
-  begin
-    ModConnEpoll(C^.Sock, C, EPOLLIN);
-  end;
-
-  procedure RemoveFromEpollLocal(Sock: Integer);
-  begin
-    epoll_ctl(EpollFd, EPOLL_CTL_DEL, Sock, nil);
-  end;
-
-  procedure HandleWriteLocal(C: PClientConnection);
-  var Ret: Integer;
-  begin
-    if C^.State = csClosed then Exit;
-    if Length(C^.OutBuf) = 0 then
-    begin
-      DisableWrite(C);
-      Exit;
-    end;
-    while Length(C^.OutBuf) > 0 do
-    begin
-      Ret := SysSend(C^.Sock, C^.OutBuf[1], Length(C^.OutBuf), 0);
-      if Ret > 0 then
-        Delete(C^.OutBuf, 1, Ret)
-      else
-      begin
-        if (fpgeterrno = ESysEAGAIN) or (fpgeterrno = ESysEWOULDBLOCK) then
-          Break;
-        CloseConnection(C);
-        Exit;
-      end;
-    end;
-    if Length(C^.OutBuf) = 0 then DisableWrite(C) else EnableWrite(C);
-  end;  }
 
 begin
   ServerIsTLS := UseTLS;
@@ -3811,7 +4330,7 @@ end;
 
 function THTTPServer.ExtractAddrHost(const ClientAddr: string): string;
 var
-  P: Integer;
+  P: integer;
   S: string;
 begin
   // ClientAddr format in this server is either "ip:port" or "[ipv6]:port" or "unknown..."
@@ -3849,7 +4368,8 @@ begin
     T := Copy(T, 2, Length(T) - 2);
 
   // Drop :port for IPv4 form "1.2.3.4:1234" (do NOT attempt for IPv6)
-  if (Pos(':', T) > 0) and (Pos('.', T) > 0) and (Pos(':', T) = LastDelimiter(':', T)) then
+  if (Pos(':', T) > 0) and (Pos('.', T) > 0) and
+    (Pos(':', T) = LastDelimiter(':', T)) then
   begin
     // looks like ipv4:port
     T := Copy(T, 1, LastDelimiter(':', T) - 1);
@@ -3858,11 +4378,11 @@ begin
   Result := Trim(T);
 end;
 
-function THTTPServer.IPv4ToUInt32(const S: string; out V: Cardinal): Boolean;
+function THTTPServer.IPv4ToUInt32(const S: string; out V: cardinal): boolean;
 var
   Parts: TStringArray;
-  I: Integer;
-  N: Integer;
+  I: integer;
+  N: integer;
 begin
   Result := False;
   V := 0;
@@ -3872,12 +4392,12 @@ begin
   begin
     if not TryStrToInt(Parts[I], N) then Exit(False);
     if (N < 0) or (N > 255) then Exit(False);
-    V := (V shl 8) or Cardinal(N);
+    V := (V shl 8) or cardinal(N);
   end;
   Result := True;
 end;
 
-function THTTPServer.IPv6ToBytes(const S: string; out B: array of Byte): Boolean;
+function THTTPServer.IPv6ToBytes(const S: string; out B: array of byte): boolean;
 var
   In6: in6_addr;
   Tmp: string;
@@ -3897,11 +4417,11 @@ begin
   end;
 end;
 
-function THTTPServer.ParseCIDR(const CIDR: string; out IsV6: Boolean; out Net4: Cardinal;
-  out Prefix: Integer; out Net6: array of Byte): Boolean;
+function THTTPServer.ParseCIDR(const CIDR: string; out IsV6: boolean;
+  out Net4: cardinal; out Prefix: integer; out Net6: array of byte): boolean;
 var
   S, IPPart, PrefixPart: string;
-  Slash: Integer;
+  Slash: integer;
 begin
   Result := False;
   IsV6 := False;
@@ -3937,16 +4457,16 @@ begin
   end;
 end;
 
-function THTTPServer.IPInCIDR(const IP, CIDR: string): Boolean;
+function THTTPServer.IPInCIDR(const IP, CIDR: string): boolean;
 var
-  IsV6: Boolean;
-  Net4, IP4: Cardinal;
-  Prefix: Integer;
-  Net6: array[0..15] of Byte;
-  IP6: array[0..15] of Byte;
-  Mask: Cardinal;
-  I, FullBytes, RemBits: Integer;
-  M: Byte;
+  IsV6: boolean;
+  Net4, IP4: cardinal;
+  Prefix: integer;
+  Net6: array[0..15] of byte;
+  IP6: array[0..15] of byte;
+  Mask: cardinal;
+  I, FullBytes, RemBits: integer;
+  M: byte;
 begin
   Result := False;
   if not ParseCIDR(CIDR, IsV6, Net4, Prefix, Net6) then Exit(False);
@@ -3962,7 +4482,7 @@ begin
       if IP6[I] <> Net6[I] then Exit(False);
 
     if RemBits = 0 then Exit(True);
-    M := Byte($FF) shl (8 - RemBits);
+    M := byte($FF) shl (8 - RemBits);
     Result := (IP6[FullBytes] and M) = (Net6[FullBytes] and M);
   end
   else
@@ -3970,15 +4490,15 @@ begin
     if Pos(':', IP) > 0 then Exit(False);
     if not IPv4ToUInt32(IP, IP4) then Exit(False);
     if Prefix = 0 then Exit(True);
-    Mask := Cardinal($FFFFFFFF) shl (32 - Prefix);
+    Mask := cardinal($FFFFFFFF) shl (32 - Prefix);
     Result := (IP4 and Mask) = (Net4 and Mask);
   end;
 end;
 
-function THTTPServer.IsTrustedProxyRemote(const ClientAddr: string): Boolean;
+function THTTPServer.IsTrustedProxyRemote(const ClientAddr: string): boolean;
 var
   RemoteIP: string;
-  I: Integer;
+  I: integer;
 begin
   Result := False;
   if (not FBehindProxy) then Exit(False);
@@ -3996,7 +4516,7 @@ function THTTPServer.ParseForwardedFor(const S: string): string;
 var
   L, Item, Val: string;
   Parts: TStringArray;
-  I, P: Integer;
+  I, P: integer;
 begin
   // Forwarded: for=1.2.3.4;proto=https, for="[2001:db8::1]"
   Result := '';
@@ -4028,7 +4548,7 @@ function THTTPServer.ParseXForwardedFor(const S: string): string;
 var
   L: string;
   Parts: TStringArray;
-  I: Integer;
+  I: integer;
 begin
   // X-Forwarded-For: client, proxy1, proxy2
   Result := '';
@@ -4256,7 +4776,7 @@ var
   TotalBodySize: int64;
 begin
   Result := False;
-  TotalBodySize := Length(Conn^.CurrentRequest.Body);
+  TotalBodySize := Length(Conn^.CurrentRequest.BodyBytes);
 
   while True do
   begin
@@ -4317,7 +4837,8 @@ begin
     if TotalBodySize > FMaxBodyBytes then
       raise Exception.Create('Body too large');
 
-    Conn^.CurrentRequest.Body := Conn^.CurrentRequest.Body + string(ChunkData);
+    if Length(ChunkData) > 0 then
+      Conn^.CurrentRequest.AppendBody(ChunkData[1], Length(ChunkData));
     Conn^.ChunkBytesRemaining := 0;
 
     if Length(Conn^.PlainInBuf) < 2 then
@@ -4472,13 +4993,7 @@ begin
   if Conn^.State = csClosed then Exit;
 
   {$IFDEF LINUX}
-  // Only remove from epoll if it's the global instance (RunEpollLoop) or we need to manage local EpollFd
-  // In multi-worker mode (RunEpollWorker), CloseConnection is called from CheckConnectionTimeouts (global list)
-  // or HandleEpollRead/Write (worker thread).
-  // Since EpollFd is local to the worker thread, we cannot remove it here easily without knowing the EpollFd.
-  // However, close(sock) removes it from epoll automatically.
-  // So explicit epoll_ctl(DEL) is not strictly required on close, but good for cleanliness if we have the fd.
-  // Since we don't have EpollFd here in CloseConnection, we rely on socket close.
+
   {$ENDIF}
 
   {$IFDEF ENABLE_HTTP2}
@@ -4851,12 +5366,13 @@ begin
   WriteLn('Server stopped gracefully');
 end;
 
-procedure THTTPServer.ListenAndServeTLS(const Addr: string; const CertFile, KeyFile: string);
+procedure THTTPServer.ListenAndServeTLS(const Addr: string;
+  const CertFile, KeyFile: string);
 var
   Port: word;
   Host: string;
   UseIPv6: boolean;
-  I: Integer;
+  I: integer;
   {$IFDEF WINDOWS}
   ClientSock: integer;
   Sin: TSockAddrIn;
