@@ -145,6 +145,47 @@ begin
   end;
 end.;
 ```
+
+Using loging middleware:
+```pascal
+var
+  S: THTTPServer;
+  R: THTTPRouter;
+  Rec: THTTPRecovery;
+  LogMW: THTTPLogger;
+begin
+  S := THTTPServer.Create;
+  R := THTTPRouter.Create(S);
+  Rec := THTTPRecovery.Create;
+  LogMW := THTTPLogger.Create;
+  try
+    // what do not logging
+    LogMW.SkipPaths.Add('/health');
+    LogMW.SkipPrefix.Add('/static/');
+
+    // 1) logger
+    R.Use(LogMW.RouterMiddleware);
+
+    // 2) recovery 
+    R.Use(Rec.RouterMiddleware);
+
+    // routes ...
+    R.GET('/ping', [procedure(C: TObject)
+    begin
+      THTTPRouterContext(C).Text(200, 'pong');
+    end]);
+
+    R.Mount;
+    S.ListenAndServe('0.0.0.0:8080');
+  finally
+    LogMW.Free;
+    Rec.Free;
+    R.Free;
+    S.Free;
+  end;
+end;
+
+```
 Using CORS middleware:
 
 ```pascal
