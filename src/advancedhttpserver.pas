@@ -51,7 +51,7 @@ uses
   JwaWinBase,
   {$ENDIF}
   SysUtils, StrUtils, Classes, FGL, DateUtils, syncobjs, patched_openssl,
-  ctypes, contnrs, Math,
+  ctypes, contnrs, Math
   {$IFDEF ENABLE_HTTP2}
   , nghttp2
   {$ENDIF}
@@ -220,6 +220,10 @@ type
     FMultipartForm: TStringList;
     FMultipartFiles: TMultipartFileArray;
 
+    // Body caches
+    FBodyUTF8Cached: boolean;
+    FBodyUTF8: string;
+
     procedure EnsureCookiesParsed;
     procedure EnsureQueryParsed;
     procedure EnsurePostFormParsed;
@@ -228,10 +232,6 @@ type
     procedure EnsureMultipartParsed;
     function GetMultipartBoundary(const ContentType: string): string;
     procedure ParseMultipartFormData(const Boundary: rawbytestring);
-
-    // Body caches
-    FBodyUTF8Cached: boolean;
-    FBodyUTF8: string;
     procedure InvalidateBodyCaches;
   public
     Method: string;
@@ -240,9 +240,6 @@ type
     RawQuery: string;
     Proto: string;
     Header: THeader;
-    // Backward-compat: old "Body" (string) kept, but source-of-truth is BodyBytes.
-    // Prefer using BodyBytes for binary and BodyUTF8 for text.
-    Body: string;
     BodyBytes: TBytes;
     Trailer: TTrailer;
     RemoteAddr: string;
@@ -278,6 +275,7 @@ type
     procedure ClearBody;
     procedure AppendBody(const Buf; Len: integer);
     function BodyUTF8: string;
+    function Body: string;
   end;
 
   TOnBeforeFinishResponse = reference to procedure(W: TResponseWriter; R: TRequest);
@@ -305,6 +303,7 @@ type
     FBodyBuf: ansistring;
     FBuffered: boolean;
     FTrailersSent: boolean;
+    FBytesWritten: Int64;
     FOnBeforeFinish: TOnBeforeFinishResponse;
     procedure SendRaw(const Buf; Size: integer);
   public
@@ -317,6 +316,7 @@ type
     function StatusCode: integer;
     function IsChunked: boolean;
     procedure ForceChunked;
+    function BytesWritten: Int64;
 
     function Header: THeader;
     function Trailer: TTrailer;
@@ -1633,7 +1633,6 @@ end;
 procedure TRequest.ClearBody;
 begin
   SetLength(BodyBytes, 0);
-  Body := '';
   InvalidateBodyCaches;
 end;
 
@@ -1650,10 +1649,13 @@ begin
   begin
     FBodyUTF8 := UTF8BytesToString(BodyBytes);
     FBodyUTF8Cached := True;
-    // backward-compat mirror:
-    Body := FBodyUTF8;
   end;
   Result := FBodyUTF8;
+end;
+
+function TRequest.Body: string;
+begin
+  result := BodyUTF8;
 end;
 
 // Unified URL-encoded parser
@@ -1951,7 +1953,7 @@ end;
 
 procedure TRequest.ParseMultipartFormData(const Boundary: rawbytestring);
 var
-  BodyBytes: rawbytestring;
+  vBodyBytes: rawbytestring;
   Delim, CloseDelim: rawbytestring;
   P, NextP: SizeInt;
   PartStart, PartEnd: SizeInt;
@@ -2029,13 +2031,13 @@ var
   MPF: TMultipartFile;
   RawPartBody: rawbytestring;
 begin
-  BodyBytes := RBSFromBytes(Self.BodyBytes);
+  vBodyBytes := RBSFromBytes(Self.BodyBytes);
 
   Delim := rawbytestring('--') + Boundary;
   CloseDelim := Delim + rawbytestring('--');
 
   // The body should start with --boundary
-  P := FindBytes(BodyBytes, Delim, 1);
+  P := FindBytes(vBodyBytes, Delim, 1);
   if P = 0 then Exit;
 
   // Move to after first boundary line
@@ -2043,10 +2045,10 @@ begin
   P := P + Length(Delim);
 
   // If immediately "--" then it's empty multipart
-  if FindBytes(BodyBytes, rawbytestring('--'), P) = P then Exit;
+  if FindBytes(vBodyBytes, rawbytestring('--'), P) = P then Exit;
 
   // Expect CRLF
-  if FindBytes(BodyBytes, rawbytestring(#13#10), P) = P then
+  if FindBytes(vBodyBytes, rawbytestring(#13#10), P) = P then
     Inc(P, 2);
 
   SL := TStringList.Create;
@@ -2054,25 +2056,25 @@ begin
     while True do
     begin
       // Each part: headers end with \r\n\r\n
-      HeaderEnd := FindBytes(BodyBytes, rawbytestring(#13#10#13#10), P);
+      HeaderEnd := FindBytes(vBodyBytes, rawbytestring(#13#10#13#10), P);
       if HeaderEnd = 0 then Break;
 
-      PartHead := Copy(BodyBytes, P, HeaderEnd - P);
+      PartHead := Copy(vBodyBytes, P, HeaderEnd - P);
       PartStart := HeaderEnd + 4;
 
       // Find next boundary delimiter preceded by \r\n
       // Search for \r\n--boundary
-      NextP := FindBytes(BodyBytes, rawbytestring(#13#10) + Delim, PartStart);
+      NextP := FindBytes(vBodyBytes, rawbytestring(#13#10) + Delim, PartStart);
       if NextP = 0 then Break;
 
       PartEnd := NextP; // points to CRLF before boundary
-      PartBody := Copy(BodyBytes, PartStart, PartEnd - PartStart);
+      PartBody := Copy(vBodyBytes, PartStart, PartEnd - PartStart);
 
       // Advance P to after "\r\n--boundary"
       P := NextP + 2 + Length(Delim);
 
       // Determine if it's closing boundary
-      if FindBytes(BodyBytes, rawbytestring('--'), P) = P then
+      if FindBytes(vBodyBytes, rawbytestring('--'), P) = P then
       begin
         // closing
         // optional \r\n after closing boundary; ignore
@@ -2081,7 +2083,7 @@ begin
       else
       begin
         // normal boundary, expect \r\n
-        if FindBytes(BodyBytes, rawbytestring(#13#10), P) = P then
+        if FindBytes(vBodyBytes, rawbytestring(#13#10), P) = P then
           Inc(P, 2);
       end;
 
@@ -2118,7 +2120,7 @@ begin
       end;
 
       // If closing boundary, stop
-      if FindBytes(BodyBytes, rawbytestring('--'), P) = P then
+      if FindBytes(vBodyBytes, rawbytestring('--'), P) = P then
         Break;
     end;
 
@@ -2216,6 +2218,7 @@ begin
   FHeader := THeader.Create;
   FTrailer := TTrailer.Create;
   FContentLength := 0;
+  FBytesWritten := 0;
   FExplicitCL := False;
   FBodyBuf := '';
   FBuffered := True;
@@ -2259,6 +2262,11 @@ begin
   FHeader.SetValue('Transfer-Encoding', 'chunked');
   FChunked := True;
   FExplicitCL := False;
+end;
+
+function TResponseWriter.BytesWritten: Int64;
+begin
+  Result := FBytesWritten;
 end;
 
 function TResponseWriter.Header: THeader;
@@ -2547,7 +2555,7 @@ var
   Ret, Err: integer;
 begin
   if Length(S) = 0 then Exit;
-
+  Inc(FBytesWritten, Length(S));
   if FHeadersSent then
   begin
     {$IFDEF WINDOWS}
@@ -2617,7 +2625,7 @@ var
   Ret, Err: integer;
 begin
   if Size <= 0 then Exit;
-
+  Inc(FBytesWritten, Size);
   SendHeadersIfNeeded;
 
   {$IFDEF WINDOWS}
