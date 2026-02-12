@@ -146,7 +146,7 @@ begin
 end.;
 ```
 
-Using loging middleware:
+Using logging middleware:
 ```pascal
 var
   S: THTTPServer;
@@ -184,6 +184,22 @@ begin
     S.Free;
   end;
 end;
+
+```
+Using Security middleware:
+
+```pascal
+uses AdvancedHTTPSecurity;
+
+var
+  SecCfg: TSecurityConfig;
+begin
+  SecCfg := SecurityDefaultConfig;
+  Server.Use(AdvancedSecurityMiddleware(SecCfg));
+end;
+
+//with router middleware:
+Router.Use(AdvancedSecurityRouterMiddleware(SecCfg));
 
 ```
 Using CORS middleware:
