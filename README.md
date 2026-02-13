@@ -312,7 +312,7 @@ apiV1.HandleFunc('/users', UsersV1);
 |--------|----------------|
 | **Linux** | `epoll` + edge-triggered I/O |
 | **Windows** | IOCP + Memory BIO for TLS |
-| **Concurrency** | Single-threaded event loop (no locks on hot path) |
+| **Concurrency** | Multi-threaded event loop (no locks on hot path) |
 | **Memory** | Reuse buffers, minimal allocations |
 
 > **Note**: Like Go, it’s **not multi-core by default**. For more cores, run multiple instances behind a load balancer.
