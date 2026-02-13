@@ -304,8 +304,10 @@ type
     FBuffered: boolean;
     FTrailersSent: boolean;
     FBytesWritten: Int64;
-    FOnBeforeFinish: TOnBeforeFinishResponse;
+    FOnBeforeFinish: TOnBeforeFinishResponse; // legacy single (optional)
+    FOnBeforeFinishChain: array of TOnBeforeFinishResponse;
     procedure SendRaw(const Buf; Size: integer);
+    procedure SetOnBeforeFinish(const A: TOnBeforeFinishResponse);
   public
     constructor Create(AConn: PClientConnection; AConnection: string);
     destructor Destroy; override;
@@ -330,8 +332,10 @@ type
       SameSite: TCookieSameSite = ssLax);
     procedure Finish;
     function HeadersSent: boolean;
+    procedure AddOnBeforeFinish(const A: TOnBeforeFinishResponse);
+    procedure ClearOnBeforeFinish;
     property OnBeforeFinish: TOnBeforeFinishResponse
-      read FOnBeforeFinish write FOnBeforeFinish;
+             read FOnBeforeFinish write SetOnBeforeFinish;
   end;
 
   THandlerFunc = reference to procedure(W: TResponseWriter; R: TRequest);
@@ -2228,6 +2232,8 @@ destructor TResponseWriter.Destroy;
 begin
   FTrailer.Free;
   FHeader.Free;
+  SetLength(FOnBeforeFinishChain, 0);
+  FOnBeforeFinish := nil;
   inherited Destroy;
 end;
 
@@ -2282,6 +2288,22 @@ end;
 function TResponseWriter.HeadersSent: boolean;
 begin
   Result := FHeadersSent;
+end;
+
+procedure TResponseWriter.AddOnBeforeFinish(const A: TOnBeforeFinishResponse);
+var
+  L: SizeInt;
+begin
+  if not Assigned(A) then Exit;
+  L := Length(FOnBeforeFinishChain);
+  SetLength(FOnBeforeFinishChain, L + 1);
+  FOnBeforeFinishChain[L] := A;
+end;
+
+procedure TResponseWriter.ClearOnBeforeFinish;
+begin
+  SetLength(FOnBeforeFinishChain, 0);
+  FOnBeforeFinish := nil;
 end;
 
 procedure TResponseWriter.SendRaw(const Buf; Size: integer);
@@ -2391,6 +2413,14 @@ begin
   end;
   if FUseTLS then FServer.FlushWriteBIO(FConn);
 end;
+
+procedure TResponseWriter.SetOnBeforeFinish(const A: TOnBeforeFinishResponse);
+begin
+  //compat: property assignment works like "Append" rather than "Replace"
+  FOnBeforeFinish := A;
+  AddOnBeforeFinish(A);
+end;
+
 {$ENDIF}
 
 procedure TResponseWriter.WriteHeader(Code: integer);
@@ -2658,7 +2688,7 @@ end;
 procedure TResponseWriter.Finish;
 var
   EndChunk: string;
-  I: integer;
+  I, J: integer;
   TrailerData: string;
 begin
   // Prohibit sending body for 1xx, 204, 304
@@ -2679,8 +2709,9 @@ begin
     Exit;
   end;
 
-  if Assigned(FOnBeforeFinish) then
-    FOnBeforeFinish(Self, FConn^.CurrentRequest);
+  for J := 0 to High(FOnBeforeFinishChain) do
+    if Assigned(FOnBeforeFinishChain[J]) then
+      FOnBeforeFinishChain[J](Self, FConn^.CurrentRequest);
 
   if (not FHeadersSent) and FBuffered then
   begin
