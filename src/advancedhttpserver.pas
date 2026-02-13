@@ -137,10 +137,12 @@ const
   BODY_READ_TIMEOUT = 60;         // seconds
 
 type
+  TRequest = class;
   THTTPServer = class;          // forward
   PClientConnection = ^TClientConnection; // forward
   TResponseWriter = class; // forward
 
+  TOnBodyChunk = reference to function(R: TRequest; const Buf; Len: integer): boolean;
   {$IFDEF Linux}
   TSockAddrIn = sockaddr_in;
   {$ENDIF}
@@ -208,6 +210,12 @@ type
     FCookiesParsed: boolean;
     FCookies: TStringList;
 
+    // streaming mode (for uploads)
+    FStreaming: boolean;
+    FOnBodyChunk: TOnBodyChunk;
+    FBodyBytesReceived: int64;
+    FMaxBodyInMemory: int64;
+
     // Fields for caching
     FQueryParsed: boolean;
     FQueryParams: TStringList;
@@ -247,6 +255,13 @@ type
     TransferEncoding: array of string;
     ContentLength: int64;
     Context: TContext;
+
+    // Streaming request body API:
+    // Call EnableStreaming(...) BEFORE body is read (e.g. in handler is too late).
+    procedure EnableStreaming(const AOnChunk: TOnBodyChunk; AMaxBodyInMemory: int64 = 0);
+    function IsStreaming: boolean;
+    function BodyBytesReceived: int64;
+
     constructor Create;
     destructor Destroy; override;
 
@@ -303,7 +318,7 @@ type
     FBodyBuf: ansistring;
     FBuffered: boolean;
     FTrailersSent: boolean;
-    FBytesWritten: Int64;
+    FBytesWritten: int64;
     FOnBeforeFinish: TOnBeforeFinishResponse; // legacy single (optional)
     FOnBeforeFinishChain: array of TOnBeforeFinishResponse;
     procedure SendRaw(const Buf; Size: integer);
@@ -318,7 +333,7 @@ type
     function StatusCode: integer;
     function IsChunked: boolean;
     procedure ForceChunked;
-    function BytesWritten: Int64;
+    function BytesWritten: int64;
 
     function Header: THeader;
     function Trailer: TTrailer;
@@ -335,7 +350,7 @@ type
     procedure AddOnBeforeFinish(const A: TOnBeforeFinishResponse);
     procedure ClearOnBeforeFinish;
     property OnBeforeFinish: TOnBeforeFinishResponse
-             read FOnBeforeFinish write SetOnBeforeFinish;
+      read FOnBeforeFinish write SetOnBeforeFinish;
   end;
 
   THandlerFunc = reference to procedure(W: TResponseWriter; R: TRequest);
@@ -409,6 +424,10 @@ type
     CurrentWriter: TResponseWriter;
     KeepAlive: boolean;
     PipelineRequests: TList;  // List of PPendingRequest
+    // Split timeouts: network idle vs handler processing heartbeat
+    NetLastActivity: TDateTime;   // updated on socket read/write progress
+    ProcStartAt: TDateTime;       // set when request is handed to handler pool
+    ProcLastActivity: TDateTime;  // handler can "touch" to avoid process timeout
     LastActivity: TDateTime;
     LastStateChange: TDateTime;
     ChunkBytesRemaining: int64;
@@ -475,6 +494,25 @@ type
   end;
   {$ENDIF}
 
+  // Handler execution pool (decouple from epoll/IOCP)
+type
+  PHandlerJob = ^THandlerJob;
+
+  THandlerJob = record
+    Conn: PClientConnection;
+    Head: ansistring;
+    Body: ansistring; // may be empty if streamed
+  end;
+
+  THandlerWorker = class(TThread)
+  private
+    FServer: THTTPServer;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(AServer: THTTPServer);
+  end;
+
   { THTTPServer }
   THTTPServer = class
   private
@@ -488,9 +526,12 @@ type
     // Worker threads support
     FWorkerCount: integer;
     FWorkers: array of TThread;
-
-
-
+    FHandlerQueue: TList;
+    FHandlerQueueLock: TCriticalSection;
+    FHandlerQueueEvent: PRTLEvent;
+    FHandlerWorkers: array of THandlerWorker;
+    FHandlerWorkerCount: integer;
+    FRequestProcessTimeout: integer;
     FRoutes: TRouteList;
     FHostRoutes: THostRouteList;
     FMiddlewares: array of TMiddleware;
@@ -541,7 +582,16 @@ type
     procedure RunEpollWorker(const Host: string; Port: Word; UseIPv6: Boolean; UseTLS: Boolean);
     {$ENDIF}
     procedure ProcessRequestsFromBuffer(Conn: PClientConnection);
+    procedure EnqueueHandlerJob(Conn: PClientConnection; const Head, Body: ansistring);
+    function DequeueHandlerJob(out Job: THandlerJob): boolean;
+    procedure StartHandlerPool;
+    procedure StopHandlerPool;
+    procedure ExecuteHandlerJob(const Job: THandlerJob);
 
+    // streaming reads (body chunks)
+    function FeedBodyChunk(Conn: PClientConnection; const Buf; Len: integer): boolean;
+    procedure TouchNet(Conn: PClientConnection);
+    procedure TouchProc(Conn: PClientConnection);
     function FindHandlerByHost(const Host, Path: string; out Handler: THandlerFunc;
       out RedirectTo: string): boolean;
     function FindHandlerOrRedirect(const Path: string; out Handler: THandlerFunc;
@@ -1594,6 +1644,10 @@ begin
   ContentLength := -1;
   SetLength(TransferEncoding, 0);
   SetLength(BodyBytes, 0);
+  FStreaming := False;
+  FOnBodyChunk := nil;
+  FBodyBytesReceived := 0;
+  FMaxBodyInMemory := 0;
   FBodyUTF8Cached := False;
   FBodyUTF8 := '';
   FCookiesParsed := False;
@@ -1640,9 +1694,29 @@ begin
   InvalidateBodyCaches;
 end;
 
+procedure TRequest.EnableStreaming(const AOnChunk: TOnBodyChunk;
+  AMaxBodyInMemory: int64);
+begin
+  // Must be set before server starts reading body
+  FStreaming := Assigned(AOnChunk);
+  FOnBodyChunk := AOnChunk;
+  FMaxBodyInMemory := AMaxBodyInMemory; // 0 => keep none in memory
+end;
+
+function TRequest.IsStreaming: boolean;
+begin
+  Result := FStreaming;
+end;
+
+function TRequest.BodyBytesReceived: int64;
+begin
+  Result := FBodyBytesReceived;
+end;
+
 procedure TRequest.AppendBody(const Buf; Len: integer);
 begin
   if Len <= 0 then Exit;
+  Inc(FBodyBytesReceived, Len);
   AppendBytes(BodyBytes, Buf, Len);
   InvalidateBodyCaches;
 end;
@@ -1659,7 +1733,7 @@ end;
 
 function TRequest.Body: string;
 begin
-  result := BodyUTF8;
+  Result := BodyUTF8;
 end;
 
 // Unified URL-encoded parser
@@ -2270,7 +2344,7 @@ begin
   FExplicitCL := False;
 end;
 
-function TResponseWriter.BytesWritten: Int64;
+function TResponseWriter.BytesWritten: int64;
 begin
   Result := FBytesWritten;
 end;
@@ -2414,14 +2488,14 @@ begin
   if FUseTLS then FServer.FlushWriteBIO(FConn);
 end;
 
+{$ENDIF}
+
 procedure TResponseWriter.SetOnBeforeFinish(const A: TOnBeforeFinishResponse);
 begin
   //compat: property assignment works like "Append" rather than "Replace"
   FOnBeforeFinish := A;
   AddOnBeforeFinish(A);
 end;
-
-{$ENDIF}
 
 procedure TResponseWriter.WriteHeader(Code: integer);
 begin
@@ -2801,8 +2875,15 @@ begin
   FConnectionTimeout := CONNECTION_TIMEOUT;
   FHeaderReadTimeout := HEADER_READ_TIMEOUT;
   FBodyReadTimeout := BODY_READ_TIMEOUT;
+  FRequestProcessTimeout := 30;
   FMaxHeaderBytes := MAX_HEADER_BYTES;
   FMaxBodyBytes := MAX_BODY_BYTES;
+
+  FHandlerQueue := TList.Create;
+  FHandlerQueueLock := TCriticalSection.Create;
+  FHandlerQueueEvent := RTLEventCreate;
+  FHandlerWorkerCount := 0; // default: will be set in ListenAndServe if needed
+  SetLength(FHandlerWorkers, 0);
 
   // Proxy / Real IP Init
   FTrustedProxyCIDRs := TStringList.Create;
@@ -2827,6 +2908,10 @@ end;
 destructor THTTPServer.Destroy;
 begin
   Shutdown;
+  StopHandlerPool;
+  RTLeventDestroy(FHandlerQueueEvent);
+  FHandlerQueueLock.Free;
+  FHandlerQueue.Free;
   RTLeventDestroy(FShutdownEvent);
   CleanupSSL;
 
@@ -3231,6 +3316,194 @@ begin
 end;
 {$ENDIF}
 
+procedure THTTPServer.TouchNet(Conn: PClientConnection);
+begin
+  if Conn = nil then Exit;
+  Conn^.NetLastActivity := Now;
+end;
+
+procedure THTTPServer.TouchProc(Conn: PClientConnection);
+begin
+  if Conn = nil then Exit;
+  Conn^.ProcLastActivity := Now;
+end;
+
+function THTTPServer.FeedBodyChunk(Conn: PClientConnection; const Buf;
+  Len: integer): boolean;
+var
+  CanTake: integer;
+begin
+  Result := True;
+  if (Conn = nil) or (Conn^.CurrentRequest = nil) or (Len <= 0) then Exit(True);
+
+  // Update "network activity" because we are consuming inbound bytes
+  TouchNet(Conn);
+
+  // If streaming enabled, call callback and optionally keep a limited prefix in memory.
+  if Conn^.CurrentRequest.IsStreaming and
+    Assigned(Conn^.CurrentRequest.FOnBodyChunk) then
+  begin
+    if not Conn^.CurrentRequest.FOnBodyChunk(Conn^.CurrentRequest, Buf, Len) then
+    begin
+      SendErrorResponse(Conn, 400, 'Bad Request');
+      CloseConnection(Conn);
+      Exit(False);
+    end;
+
+    if Conn^.CurrentRequest.FMaxBodyInMemory > 0 then
+    begin
+      if Length(Conn^.CurrentRequest.BodyBytes) <
+        Conn^.CurrentRequest.FMaxBodyInMemory then
+      begin
+        CanTake := Conn^.CurrentRequest.FMaxBodyInMemory -
+          Length(Conn^.CurrentRequest.BodyBytes);
+        if CanTake > Len then CanTake := Len;
+        Conn^.CurrentRequest.AppendBody(Buf, CanTake);
+      end
+      else
+        Inc(Conn^.CurrentRequest.FBodyBytesReceived, Len);
+      // keep counter correct if AppendBody not called
+    end
+    else
+      Inc(Conn^.CurrentRequest.FBodyBytesReceived, Len); // no in-memory storage
+  end
+  else
+    Conn^.CurrentRequest.AppendBody(Buf, Len);
+end;
+
+procedure THTTPServer.EnqueueHandlerJob(Conn: PClientConnection;
+  const Head, Body: ansistring);
+var
+  P: PHandlerJob;
+begin
+  if Conn = nil then Exit;
+  New(P);
+  P^.Conn := Conn;
+  P^.Head := Head;
+  P^.Body := Body;
+
+  Conn^.ProcStartAt := Now;
+  Conn^.ProcLastActivity := Conn^.ProcStartAt;
+
+  FHandlerQueueLock.Enter;
+  try
+    FHandlerQueue.Add(P);
+    RTLeventSetEvent(FHandlerQueueEvent);
+  finally
+    FHandlerQueueLock.Leave;
+  end;
+end;
+
+function THTTPServer.DequeueHandlerJob(out Job: THandlerJob): boolean;
+var
+  P: PHandlerJob;
+begin
+  Result := False;
+  FillChar(Job, SizeOf(Job), 0);
+
+  FHandlerQueueLock.Enter;
+  try
+    if FHandlerQueue.Count = 0 then Exit(False);
+    P := PHandlerJob(FHandlerQueue[0]);
+    FHandlerQueue.Delete(0);
+    Job := P^;
+    Dispose(P);
+    Result := True;
+  finally
+    FHandlerQueueLock.Leave;
+  end;
+end;
+
+constructor THandlerWorker.Create(AServer: THTTPServer);
+begin
+  inherited Create(False);
+  FreeOnTerminate := False;
+  FServer := AServer;
+end;
+
+procedure THandlerWorker.Execute;
+var
+  Job: THandlerJob;
+begin
+  NameThreadForDebugging('HTTP Handler Worker');
+  while (not Terminated) and (not ShutdownRequested) do
+  begin
+    // Wait until at least one job exists
+    RTLeventWaitFor(FServer.FHandlerQueueEvent, 100);
+
+    // Drain queue
+    while (not Terminated) and FServer.DequeueHandlerJob(Job) do
+      FServer.ExecuteHandlerJob(Job);
+
+    RTLeventResetEvent(FServer.FHandlerQueueEvent);
+  end;
+end;
+
+procedure THTTPServer.StartHandlerPool;
+var
+  I: integer;
+begin
+  if Length(FHandlerWorkers) > 0 then Exit;
+  if FHandlerWorkerCount <= 0 then
+    FHandlerWorkerCount := Max(2, FWorkerCount); // conservative default
+
+  SetLength(FHandlerWorkers, FHandlerWorkerCount);
+  for I := 0 to High(FHandlerWorkers) do
+    FHandlerWorkers[I] := THandlerWorker.Create(Self);
+end;
+
+procedure THTTPServer.StopHandlerPool;
+var
+  I: integer;
+begin
+  for I := 0 to High(FHandlerWorkers) do
+    if Assigned(FHandlerWorkers[I]) then
+      FHandlerWorkers[I].Terminate;
+
+  RTLeventSetEvent(FHandlerQueueEvent);
+
+  for I := 0 to High(FHandlerWorkers) do
+    if Assigned(FHandlerWorkers[I]) then
+    begin
+      FHandlerWorkers[I].WaitFor;
+      FreeAndNil(FHandlerWorkers[I]);
+    end;
+
+  SetLength(FHandlerWorkers, 0);
+end;
+
+procedure THTTPServer.ExecuteHandlerJob(const Job: THandlerJob);
+var
+  Conn: PClientConnection;
+begin
+  Conn := Job.Conn;
+  if Conn = nil then Exit;
+
+  // If this job provides a raw head/body, parse into CurrentRequest here.
+  // For body-read continuation jobs, CurrentRequest already exists.
+  if (Job.Head <> '') then
+  begin
+    ParseRequestLine(Job.Head, Conn^.Addr, Conn^.UseTLS, Conn^.CurrentRequest);
+    Conn^.KeepAlive := WantsKeepAlive(Conn^.CurrentRequest);
+
+    Conn^.CurrentRequest.ClearBody;
+    if Length(Job.Body) > 0 then
+      Conn^.CurrentRequest.AppendBody(Job.Body[1], Length(Job.Body));
+  end;
+
+  // processing state + heartbeat
+  Conn^.State := csProcessing;
+  TouchProc(Conn);
+
+  // Run existing logic (handler + response)
+  ProcessRequest(Conn);
+
+  // After ProcessRequest, connection is ready for IO loop again
+  Conn^.ProcStartAt := 0;
+  Conn^.ProcLastActivity := 0;
+  TouchNet(Conn);
+end;
+
 procedure THTTPServer.ProcessRequestsFromBuffer(Conn: PClientConnection);
 var
   Head, Body: ansistring;
@@ -3350,7 +3623,8 @@ begin
 
           Conn^.CurrentRequest.ClearBody;
           if Length(PendingReq^.Body) > 0 then
-            Conn^.CurrentRequest.AppendBody(PendingReq^.Body[1], Length(PendingReq^.Body));
+            Conn^.CurrentRequest.AppendBody(PendingReq^.Body[1],
+              Length(PendingReq^.Body));
 
           if (Conn^.CurrentRequest.ContentLength > 0) and
             (not Conn^.CurrentRequest.HasChunkedEncoding) then
@@ -3396,13 +3670,16 @@ begin
               end;
             end;
 
-            ProcessRequest(Conn);
-            Conn^.State := csReadingHeaders;
+            // Defer handler execution to worker pool (IO thread must not block)
+            EnqueueHandlerJob(Conn, '', '');
+            Conn^.State := csProcessing;
           end
           else
           begin
-            ProcessRequest(Conn);
-            Conn^.State := csReadingHeaders;
+            // Defer handler execution to worker pool (IO thread must not block)
+            EnqueueHandlerJob(Conn, PendingReq^.Head, PendingReq^.Body);
+            // Conn state becomes processing until job completes
+            Conn^.State := csProcessing;
           end;
 
           Dispose(PendingReq);
@@ -3429,13 +3706,15 @@ begin
       if Length(Conn^.PlainInBuf) >= Conn^.BodyBytesRemaining then
       begin
         if Conn^.BodyBytesRemaining > 0 then
-          Conn^.CurrentRequest.AppendBody(Conn^.PlainInBuf[1], Conn^.BodyBytesRemaining);
+          if not FeedBodyChunk(Conn, Conn^.PlainInBuf[1], Conn^.BodyBytesRemaining) then
+            Exit;
         Delete(Conn^.PlainInBuf, 1, Conn^.BodyBytesRemaining);
 
         Inc(Conn^.BodyBytesRead, Conn^.BodyBytesRemaining);
 
-        ProcessRequest(Conn);
-        Conn^.State := csReadingHeaders;
+        // body fully read, schedule handler
+        EnqueueHandlerJob(Conn, '', ''); // head/body already in Conn^.CurrentRequest
+        Conn^.State := csProcessing;
         Conn^.BodyBytesRead := 0;
 
         if Length(Conn^.PlainInBuf) > 0 then
@@ -3444,7 +3723,8 @@ begin
       else
       begin
         if Length(Conn^.PlainInBuf) > 0 then
-          Conn^.CurrentRequest.AppendBody(Conn^.PlainInBuf[1], Length(Conn^.PlainInBuf));
+          if not FeedBodyChunk(Conn, Conn^.PlainInBuf[1], Length(Conn^.PlainInBuf)) then
+            Exit;
 
         Inc(Conn^.BodyBytesRead, Length(Conn^.PlainInBuf));
 
@@ -3459,8 +3739,8 @@ begin
       try
         if ReadChunkedBody(Conn) then
         begin
-          ProcessRequest(Conn);
-          Conn^.State := csReadingHeaders;
+          EnqueueHandlerJob(Conn, '', '');
+          Conn^.State := csProcessing;
 
           if Length(Conn^.PlainInBuf) > 0 then
             ProcessRequestsFromBuffer(Conn);
@@ -3614,7 +3894,7 @@ begin
       // If we fed data, process SSL (Handshake or Decrypt)
       if ReadAny then
       begin
-        Conn^.LastActivity := Now;
+        TouchNet(Conn);
         ProcessSSL(Conn);
       end;
     end
@@ -3646,7 +3926,7 @@ begin
       if ReadAny then
       begin
         Conn^.PlainInBuf := Conn^.PlainInBuf + ReadTmp;
-        Conn^.LastActivity := Now;
+        TouchNet(Conn);
         ProcessRequestsFromBuffer(Conn);
       end;
     end;
@@ -3722,7 +4002,9 @@ begin
           Conn^.CurrentWriter := nil;
           Conn^.KeepAlive := True;
           Conn^.PipelineRequests := TList.Create;
-          Conn^.LastActivity := Now;
+          Conn^.NetLastActivity := Now;
+          Conn^.ProcStartAt := 0;
+          Conn^.ProcLastActivity := 0;
           Conn^.LastStateChange := Now;
           Conn^.ChunkBytesRemaining := 0;
           Conn^.BodyBytesRemaining := 0;
@@ -3954,7 +4236,9 @@ begin
           Conn^.CurrentWriter := nil;
           Conn^.KeepAlive := True;
           Conn^.PipelineRequests := TList.Create;
-          Conn^.LastActivity := Now;
+          Conn^.NetLastActivity := Now;
+          Conn^.ProcStartAt := 0;
+          Conn^.ProcLastActivity := 0;
           Conn^.LastStateChange := Now;
           Conn^.ChunkBytesRemaining := 0;
           Conn^.BodyBytesRemaining := 0;
@@ -4138,7 +4422,7 @@ begin
           begin
             SetString(Chunk, pansichar(@IOCtx^.Buffer[0]), BytesTransferred);
             Conn^.PlainInBuf := Conn^.PlainInBuf + Chunk;
-            Conn^.LastActivity := Now;
+            TouchNet(Conn);
             ProcessRequestsFromBuffer(Conn);
           end;
 
@@ -4189,6 +4473,21 @@ begin
         Conn := PClientConnection(FConnections[I]);
         if not Assigned(Conn) then Continue;
 
+        // Split timeouts:
+        // - for reading: idle by network activity
+        // - for processing: handler execution timeout (Proc*)
+        if (Conn^.State = csProcessing) then
+        begin
+          if (Conn^.ProcStartAt > 0) and
+            (SecondsBetween(Now, IfThen(Conn^.ProcLastActivity > 0,
+            Conn^.ProcLastActivity, Conn^.ProcStartAt)) > FRequestProcessTimeout) then
+          begin
+            WriteLn('Closing stuck processing connection: ', Conn^.Addr);
+            ToClose.Add(Conn);
+          end;
+          Continue;
+        end;
+
         case Conn^.State of
           csSSLHandshake, csReadingHeaders:
             Timeout := FHeaderReadTimeout;
@@ -4198,7 +4497,7 @@ begin
             Timeout := FConnectionTimeout;
         end;
 
-        if SecondsBetween(Now, Conn^.LastActivity) > Timeout then
+        if SecondsBetween(Now, Conn^.NetLastActivity) > Timeout then
         begin
           WriteLn('Closing idle connection: ', Conn^.Addr);
           ToClose.Add(Conn);
@@ -4407,8 +4706,8 @@ begin
     T := Copy(T, 2, Length(T) - 2);
 
   // Drop :port for IPv4 form "1.2.3.4:1234" (do NOT attempt for IPv6)
-  if (Pos(':', T) > 0) and (Pos('.', T) > 0) and
-    (Pos(':', T) = LastDelimiter(':', T)) then
+  if (Pos(':', T) > 0) and (Pos('.', T) > 0) and (Pos(':', T) =
+    LastDelimiter(':', T)) then
   begin
     // looks like ipv4:port
     T := Copy(T, 1, LastDelimiter(':', T) - 1);
@@ -4495,6 +4794,8 @@ begin
     Result := True;
   end;
 end;
+
+
 
 function THTTPServer.IPInCIDR(const IP, CIDR: string): boolean;
 var
@@ -4877,7 +5178,9 @@ begin
       raise Exception.Create('Body too large');
 
     if Length(ChunkData) > 0 then
-      Conn^.CurrentRequest.AppendBody(ChunkData[1], Length(ChunkData));
+      if not FeedBodyChunk(Conn, ChunkData[1], Length(ChunkData)) then
+        Exit(False); // FeedBodyChunk handles error response
+
     Conn^.ChunkBytesRemaining := 0;
 
     if Length(Conn^.PlainInBuf) < 2 then
@@ -5012,7 +5315,7 @@ begin
 
   Conn^.State := csReadingHeaders;
   Conn^.HeaderStartTime := Now;
-  Conn^.LastActivity := Now;
+  TouchNet(Conn);
   Conn^.BodyBytesRead := 0;
 
   {$IFDEF LINUX}
@@ -5032,7 +5335,11 @@ begin
   if Conn^.State = csClosed then Exit;
 
   {$IFDEF LINUX}
-
+  // Removed from epoll in the thread that manages it, but we check state here.
+  // Note: CloseConnection might be called from different threads (timeout vs io loop).
+  // Ideally, removal from epoll happens in the loop or via safe cleanup.
+  // Since this patch introduces a handler pool, we must be careful.
+  // The logic here assumes the connection is being cleaned up.
   {$ENDIF}
 
   {$IFDEF ENABLE_HTTP2}
@@ -5246,6 +5553,7 @@ var
   ClientLen: Integer;
   {$ENDIF}
 begin
+  StartHandlerPool;
   {$IFDEF UNIX}
   fpSignal(SIGINT, @HandleSignal);
   fpSignal(SIGTERM, @HandleSignal);
@@ -5361,7 +5669,9 @@ begin
           Conn^.CurrentWriter := nil;
           Conn^.KeepAlive := True;
           Conn^.PipelineRequests := TList.Create;
-          Conn^.LastActivity := Now;
+          Conn^.NetLastActivity := Now;
+          Conn^.ProcStartAt := 0;
+          Conn^.ProcLastActivity := 0;
           Conn^.LastStateChange := Now;
           Conn^.ChunkBytesRemaining := 0;
           Conn^.BodyBytesRemaining := 0;
@@ -5425,6 +5735,7 @@ var
   ClientLen: Integer;
   {$ENDIF}
 begin
+  StartHandlerPool;
   {$IFDEF UNIX}
   fpSignal(SIGINT, @HandleSignal);
   fpSignal(SIGTERM, @HandleSignal);
@@ -5567,7 +5878,9 @@ begin
           Conn^.CurrentWriter := nil;
           Conn^.KeepAlive := True;
           Conn^.PipelineRequests := TList.Create;
-          Conn^.LastActivity := Now;
+          Conn^.NetLastActivity := Now;
+          Conn^.ProcStartAt := 0;
+          Conn^.ProcLastActivity := 0;
           Conn^.LastStateChange := Now;
           Conn^.ChunkBytesRemaining := 0;
           Conn^.BodyBytesRemaining := 0;
