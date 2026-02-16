@@ -237,6 +237,47 @@ begin
   // routes...
 end;
 ```
+Using cache middleware:
+
+```pascal
+uses
+  AdvancedHTTPServer, AdvancedHTTPRouter, AdvancedHTTPCache;
+
+var
+  Srv: THTTPServer;
+  Router: THTTPRouter;
+  Cfg: THTTPCacheConfig;
+begin
+  Srv := THTTPServer.Create;
+  Router := THTTPRouter.Create(Srv);
+
+ { Cfg := CacheDefaultConfig;
+  Cfg.CacheStatuses := [200];
+  Cfg.CacheMethods := ['GET'];
+  Cfg.DefaultTTLSeconds := 5;
+  Cfg.UseRoutePattern := False;     
+  Cfg.VaryByOrigin := False;       
+  Cfg.VaryByAcceptJSON := True; }
+  Cfg.CacheStatuses := [200,301,404];
+  Cfg.DefaultTTLSeconds := 10; 
+
+  Router.Use(CacheRouterMiddleware(Router, Cfg));
+
+  Router.GET('/api/ping', [
+    procedure(C: TObject)
+    var Ctx: THTTPRouterContext;
+    begin
+      Ctx := THTTPRouterContext(C);
+      Ctx.Text(200, 'pong');
+    end
+  ]);
+
+  Router.Mount;
+  Srv.ListenAndServe('0.0.0.0:8080');
+end;
+
+```
+
 
 ### Trailers
 
