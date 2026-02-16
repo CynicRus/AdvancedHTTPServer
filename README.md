@@ -220,6 +220,24 @@ begin
 end;
 ```
 
+Using redirect middleware:
+
+```pascal
+var
+  Router: THTTPRouter;
+  Cfg: TRedirectConfig;
+begin
+  Router := THTTPRouter.Create(Server);
+  Router.Mount;
+
+  Cfg := RedirectHTTPSWWWConfig;
+  Cfg.Code := 308; 
+  Router.Use(RedirectRouterMiddleware(Cfg));
+
+  // routes...
+end;
+```
+
 ### Trailers
 
 Send HTTP trailers (like gRPC):
