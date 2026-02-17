@@ -57,6 +57,11 @@ type
     // Behavior
     AbortPreflight: boolean;          // True: Respond to OPTIONS preflight directly in middleware
     AutoMethodsFromRouter: boolean;   // True: Access-Control-Allow-Methods build from routes (Allow header)
+
+    // Extra / modern
+    AllowPrivateNetwork: boolean;     // If true: handle PNA preflight and emit Access-Control-Allow-Private-Network
+    AllowNullOrigin: boolean;         // If true: treat Origin: null as eligible for allow
+    AllowedMethods: string;           // Static allow methods (comma-separated). Used if AutoMethodsFromRouter=false or router can't provide.
   end;
 
 function CorsDefaultConfig: TCorsConfig;
@@ -72,7 +77,7 @@ type
     Exact: string;       // for orkExact: normalized lower origin 'scheme://host[:port]'
     Scheme: string;      // for wildcard kinds
     HostSuffix: string;  // for wildcard host: '.example.com' (без '*')
-    Port: string;        // for wildcard port: '*' or '3000' etc (в наших вариантах '*' значит any)
+    Port: string;        // for wildcard port: '*' or '3000' etc
   end;
 
   TCorsState = class
@@ -104,6 +109,10 @@ begin
 
   Result.AbortPreflight := True;
   Result.AutoMethodsFromRouter := True;
+
+  Result.AllowPrivateNetwork := False;
+  Result.AllowNullOrigin := False;
+  Result.AllowedMethods := '';
 end;
 
 function TrimLower(const S: string): string; inline;
@@ -111,10 +120,28 @@ begin
   Result := LowerCase(Trim(S));
 end;
 
-function NormalizeOriginLower(const OriginRaw: string; out Scheme, Host, Port, Normalized: string): boolean;
+function TryParsePortStrict(const S: string; out PortNum: integer): boolean;
+var
+  I: integer;
+  V: int64;
+begin
+  Result := False;
+  PortNum := -1;
+  if S = '' then Exit(False);
+  for I := 1 to Length(S) do
+    if not (S[I] in ['0'..'9']) then Exit(False);
+
+  V := StrToInt64Def(S, -1);
+  if (V < 0) or (V > 65535) then Exit(False);
+  PortNum := integer(V);
+  Result := True;
+end;
+
+function NormalizeOriginLower_Request(const OriginRaw: string; out Scheme, Host, Port, Normalized: string): boolean;
 var
   S: string;
   P, HStart, HEnd: SizeInt;
+  PortNum: integer;
 begin
   Result := False;
   Scheme := ''; Host := ''; Port := ''; Normalized := '';
@@ -122,51 +149,130 @@ begin
   S := Trim(OriginRaw);
   if S = '' then Exit(False);
 
-  // We accept only scheme://...
+  if SameText(S, 'null') then
+  begin
+    // request parser recognizes it, policy will decide
+    Normalized := 'null';
+    Result := True;
+    Exit;
+  end;
+
   P := Pos('://', S);
   if P <= 0 then Exit(False);
 
   Scheme := LowerCase(Copy(S, 1, P - 1));
-  if (Scheme = '') then Exit(False);
+  if Scheme = '' then Exit(False);
 
-  // host[:port] (we ignore any path; per Origin header it must not have it)
   HStart := P + 3;
   if HStart > Length(S) then Exit(False);
 
-  // strip trailing slash just in case
-  if (Length(S) > HStart) and (S[Length(S)] = '/') then
-    SetLength(S, Length(S) - 1);
+  // Origin must be just scheme://host[:port] with no path/query/fragment
+  if (Pos('/', Copy(S, HStart, MaxInt)) > 0) or
+     (Pos('?', Copy(S, HStart, MaxInt)) > 0) or
+     (Pos('#', Copy(S, HStart, MaxInt)) > 0) then
+    Exit(False);
 
-  // bracketed IPv6: [::1]:3000
-  if (HStart <= Length(S)) and (S[HStart] = '[') then
+  // bracketed IPv6
+  if (S[HStart] = '[') then
   begin
     HEnd := Pos(']', S);
     if HEnd <= 0 then Exit(False);
-    Host := LowerCase(Copy(S, HStart, HEnd - HStart + 1)); // keep brackets
+    Host := LowerCase(Copy(S, HStart, HEnd - HStart + 1));
     if (HEnd < Length(S)) and (S[HEnd + 1] = ':') then
-      Port := Copy(S, HEnd + 2, MaxInt)
-    else
-      Port := '';
+    begin
+      Port := Copy(S, HEnd + 2, MaxInt);
+      if not TryParsePortStrict(Port, PortNum) then Exit(False);
+      Port := IntToStr(PortNum);
+    end;
   end
   else
   begin
-    // host[:port]
     HEnd := LastDelimiter(':', S);
-    if (HEnd > 0) and (HEnd >= HStart) and (Pos('://', Copy(S, HEnd, MaxInt)) = 0) then
+    if (HEnd > 0) and (HEnd >= HStart) then
     begin
-      // if there is exactly one ':' after scheme and it looks like port separator
       Host := LowerCase(Copy(S, HStart, HEnd - HStart));
       Port := Copy(S, HEnd + 1, MaxInt);
-      // If host becomes empty, treat as invalid
       if Host = '' then Exit(False);
-      // If Port contains '/', invalid for Origin, but ignore by marking invalid:
-      if Pos('/', Port) > 0 then Exit(False);
+      if not TryParsePortStrict(Port, PortNum) then Exit(False);
+      Port := IntToStr(PortNum);
     end
     else
     begin
       Host := LowerCase(Copy(S, HStart, MaxInt));
+      if Host = '' then Exit(False);
+    end;
+  end;
+
+  if Port <> '' then
+    Normalized := Scheme + '://' + Host + ':' + Port
+  else
+    Normalized := Scheme + '://' + Host;
+
+  Result := True;
+end;
+
+function NormalizeOriginLower_Pattern(const PatternRaw: string; out Scheme, Host, Port, Normalized: string): boolean;
+var
+  S: string;
+  P, HStart, HEnd: SizeInt;
+  PortNumCheck: integer;
+begin
+  Result := False;
+  Scheme := ''; Host := ''; Port := ''; Normalized := '';
+
+  S := Trim(PatternRaw);
+  if S = '' then Exit(False);
+
+  if SameText(S, 'null') then
+  begin
+    Normalized := 'null';
+    Result := True;
+    Exit;
+  end;
+
+  P := Pos('://', S);
+  if P <= 0 then Exit(False);
+
+  Scheme := LowerCase(Copy(S, 1, P - 1));
+  if Scheme = '' then Exit(False);
+
+  HStart := P + 3;
+  if HStart > Length(S) then Exit(False);
+
+  // Patterns also must not include path/query/fragment
+  if (Pos('/', Copy(S, HStart, MaxInt)) > 0) or
+     (Pos('?', Copy(S, HStart, MaxInt)) > 0) or
+     (Pos('#', Copy(S, HStart, MaxInt)) > 0) then
+    Exit(False);
+
+  // bracketed IPv6, port cannot be '*'
+  if (S[HStart] = '[') then
+  begin
+    HEnd := Pos(']', S);
+    if HEnd <= 0 then Exit(False);
+    Host := LowerCase(Copy(S, HStart, HEnd - HStart + 1));
+    if (HEnd < Length(S)) and (S[HEnd + 1] = ':') then
+      Port := Copy(S, HEnd + 2, MaxInt)
+    else
       Port := '';
-      if (Host = '') or (Pos('/', Host) > 0) then Exit(False);
+    if Port = '*' then Exit(False);
+  end
+  else
+  begin
+    HEnd := LastDelimiter(':', S);
+    if (HEnd > 0) and (HEnd >= HStart) then
+    begin
+      Host := LowerCase(Copy(S, HStart, HEnd - HStart));
+      Port := Copy(S, HEnd + 1, MaxInt);
+      if Host = '' then Exit(False);
+      // For patterns allow numeric port or '*'
+      if (Port <> '') and (Port <> '*') then
+        if not TryParsePortStrict(Port, PortNumCheck) then Exit(False);
+    end
+    else
+    begin
+      Host := LowerCase(Copy(S, HStart, MaxInt));
+      if Host = '' then Exit(False);
     end;
   end;
 
@@ -196,7 +302,8 @@ begin
   end;
 
   // exact or wildcard forms only in scheme://...
-  if not NormalizeOriginLower(P, Scheme, Host, Port, Norm) then
+  // Use Pattern normalization
+  if not NormalizeOriginLower_Pattern(P, Scheme, Host, Port, Norm) then
     Exit(False);
 
   // Exact by default
@@ -208,7 +315,6 @@ begin
   // scheme://*.example.com[:port?]
   // scheme://*.example.com:*  (any port)
   // scheme://host:*           (any port)
-  // scheme://*.* ??? not supported
 
   // wildcard port
   if Port = '*' then
@@ -330,15 +436,29 @@ begin
   NormalizedOrigin := '';
   if OriginRaw = '' then Exit(False);
 
-  if Cfg.AllowAnyOrigin then
+  if not NormalizeOriginLower_Request(OriginRaw, Scheme, Host, Port, NormalizedOrigin) then
+    Exit(False);
+
+  // Origin: null policy gate
+  if NormalizedOrigin = 'null' then
   begin
-    // Still normalize for reflect / vary correctness and to reject garbage
-    Result := NormalizeOriginLower(OriginRaw, Scheme, Host, Port, NormalizedOrigin);
-    Exit(Result);
+    if not Cfg.AllowNullOrigin then
+      Exit(False);
+
+    // AllowAnyOrigin => allow (will be reflected as "null" if AllowCredentials or AllowAnyOrigin=false logic reflects)
+    if Cfg.AllowAnyOrigin then
+      Exit(True);
+
+    // Otherwise only if explicitly present in rules (exact 'null') or orkAny
+    for I := 0 to High(Rules) do
+      if (Rules[I].Kind = orkAny) or ((Rules[I].Kind = orkExact) and (Rules[I].Exact = 'null')) then
+        Exit(True);
+
+    Exit(False);
   end;
 
-  if not NormalizeOriginLower(OriginRaw, Scheme, Host, Port, NormalizedOrigin) then
-    Exit(False);
+  if Cfg.AllowAnyOrigin then
+    Exit(True);
 
   for I := 0 to High(Rules) do
   begin
@@ -456,19 +576,39 @@ begin
     // Preflight
     if State.Cfg.AbortPreflight and IsPreflight(Ctx.R) then
     begin
-      // Methods: from router routes if enabled
+      // Cache poisoning protection for preflight reflection
+      AppendVaryHeader(Ctx.W.Header, 'Access-Control-Request-Method');
+
+      // Private Network Access (PNA)
+      if State.Cfg.AllowPrivateNetwork and
+         SameText(Trim(Ctx.R.Header.GetValue('Access-Control-Request-Private-Network')), 'true') then
+      begin
+        AppendVaryHeader(Ctx.W.Header, 'Access-Control-Request-Private-Network');
+        Ctx.W.Header.SetValue('Access-Control-Allow-Private-Network', 'true');
+      end;
+
+      // Methods logic
+      AllowMethods := '';
+
+      // Prefer router-derived "Allow" if enabled
       if State.Cfg.AutoMethodsFromRouter and (State.Router <> nil) then
       begin
-        // normalize path same as router does to hit cache keys consistently
         PathNorm := State.Router.NormalizePath(Ctx.R.Path);
         AllowMethods := State.ResolveAllowMethodsForPath(PathNorm);
-        if AllowMethods <> '' then
-          Ctx.W.Header.SetValue('Access-Control-Allow-Methods', AllowMethods);
-      end
-      else
-      begin
-        // fallback (static list)
       end;
+
+      //  If router didn't provide, use static config string if present
+      if Trim(AllowMethods) = '' then
+        AllowMethods := Trim(State.Cfg.AllowedMethods);
+
+      //  Final fallback: reflect Access-Control-Request-Method
+      if Trim(AllowMethods) = '' then
+      begin
+        AllowMethods := Trim(Ctx.R.Header.GetValue('Access-Control-Request-Method'));
+      end;
+
+      if Trim(AllowMethods) <> '' then
+        Ctx.W.Header.SetValue('Access-Control-Allow-Methods', AllowMethods);
 
       // Headers
       if Trim(State.Cfg.AllowedHeaders) <> '' then
@@ -478,7 +618,7 @@ begin
         ReqHeaders := Trim(Ctx.R.Header.GetValue('Access-Control-Request-Headers'));
         if ReqHeaders <> '' then
         begin
-          // recommended: vary by ACRH when reflecting
+          //  vary by ACRH when reflecting
           AppendVaryHeader(Ctx.W.Header, 'Access-Control-Request-Headers');
           Ctx.W.Header.SetValue('Access-Control-Allow-Headers', ReqHeaders);
         end;
@@ -503,4 +643,3 @@ initialization
 finalization
 
 end.
-
