@@ -37,8 +37,15 @@ unit AdvancedHTTPSecurity;
 interface
 
 uses
+  {$IFDEF MSWINDOWS}
+   jwawincrypt,
+  {$ENDIF}
+  {$IFDEF UNIX}
+   BaseUnix,
+  {$ENDIF}
   SysUtils, Classes, DateUtils, StrUtils, syncobjs, fpjson, math,
-  AdvancedHTTPServer, AdvancedHTTPRouter;
+  AdvancedHTTPServer, AdvancedHTTPRouter,
+  HashMap;
 
 type
   TSecurityConfig = record
@@ -52,10 +59,12 @@ type
     CSRFHeaderName: string;   // e.g. "X-CSRF-Token"
     CSRFCookieName: string;   // e.g. "csrf_token"
     CSRFTokenLength: integer; // e.g. 32
-    CSRFSameSite: TResponseWriter.TCookieSameSite; // Lax/Strict
+    CSRFSameSite: TResponseWriter.TCookieSameSite; // Lax/Strict/None
     CSRFSecureCookie: boolean; // set true on TLS
+    CSRFTrustedOrigins: TStringArray; // e.g. ['https://app.example.com', 'https://*.example.com']
+    CSRFCookieHTTPOnly: boolean;      // default True
+    CSRFAcceptSecFetchSite: boolean;  // Validate Sec-Fetch-Site header
     RequireCSRFForMethods: TStringArray; // e.g. ['POST','PUT','PATCH','DELETE']
-    // If true: for unsafe methods require Origin/Referer same-site (good baseline even without token)
     EnforceOriginForUnsafe: boolean;
 
     // --- Input validation / anti-XSS / anti-SQLi heuristics ---
@@ -82,7 +91,7 @@ type
     // --- Small allowlists / ignores ---
     SkipPathPrefixes: TStringArray; // e.g. ['/static/','/health']
   end;
-  
+
 type
   TTokenBucket = record
     Tokens: double;
@@ -96,16 +105,20 @@ type
   end;
 
   TSecurityState = class
+  private
+    type
+      TRateMap = specialize TStringHashMap<TTokenBucket>;
+      TBruteMap = specialize TStringHashMap<TAttemptWindow>;
   public
     Cfg: TSecurityConfig;
 
     Lock: TCriticalSection;
 
     // Rate limit: key -> bucket
-    Rate: TStringList;
+    Rate: TRateMap;
 
-    // Brute: key -> packed "count|windowStart|blockUntil"
-    Brute: TStringList;
+    // Brute: key -> attempt window
+    Brute: TBruteMap;
 
     constructor Create(const ACfg: TSecurityConfig);
     destructor Destroy; override;
@@ -134,10 +147,14 @@ type
     // Helpers
     function MethodInList(const M: string; const L: TStringArray): boolean;
     function LooksSuspicious(const S: string): boolean;
-    function SameSiteByOriginOrReferer(const R: TRequest): boolean;
+
+    // CSRF Helpers (New/Updated)
+    function ConstantTimeEquals(const A, B: string): boolean;
+    function ValidateSecFetchSite(const R: TRequest): boolean;
+    function CheckOriginReferer(const R: TRequest): boolean;
     function GetHostLower(const R: TRequest): string;
     function GetHeaderLower(const R: TRequest; const Name: string): string;
-    function NewRandomTokenHex(LenBytes: integer): string;
+    class function NewRandomTokenHex(LenBytes: integer): string;
 
     procedure EnsureCSRFCookie(W: TResponseWriter; R: TRequest);
   end;
@@ -152,8 +169,6 @@ function AdvancedSecurityRouterMiddleware(const Cfg: TSecurityConfig): TRouterMi
 
 implementation
 
-
-
 function SecurityDefaultConfig: TSecurityConfig;
 begin
   FillChar(Result, SizeOf(Result), 0);
@@ -161,12 +176,15 @@ begin
   Result.PreferJSON := True;
   Result.JSONErrorKey := 'error';
 
-  Result.EnableCSRF := False;
+  Result.EnableCSRF := False; // Disabled by default unless configured
   Result.CSRFHeaderName := 'X-CSRF-Token';
   Result.CSRFCookieName := 'csrf_token';
   Result.CSRFTokenLength := 32;
   Result.CSRFSameSite := TResponseWriter.TCookieSameSite.ssLax;
   Result.CSRFSecureCookie := True;
+  Result.CSRFTrustedOrigins := nil; // No trusted origins by default
+  Result.CSRFCookieHTTPOnly := True; // HttpOnly by default
+  Result.CSRFAcceptSecFetchSite := True; // Check Sec-Fetch-Site by default
   Result.RequireCSRFForMethods := ['POST','PUT','PATCH','DELETE'];
   Result.EnforceOriginForUnsafe := True;
 
@@ -200,17 +218,8 @@ begin
 
   Lock := TCriticalSection.Create;
 
-  Rate := TStringList.Create;
-  Rate.CaseSensitive := False;
-  Rate.NameValueSeparator := '=';
-  Rate.Sorted := false;
-  Rate.Duplicates := dupIgnore;
-
-  Brute := TStringList.Create;
-  Brute.CaseSensitive := False;
-  Brute.NameValueSeparator := '=';
-  Brute.Sorted := false;
-  Brute.Duplicates := dupIgnore;
+  Rate := TRateMap.Create;
+  Brute := TBruteMap.Create;
 end;
 
 destructor TSecurityState.Destroy;
@@ -352,75 +361,251 @@ begin
   end;
 end;
 
-function TSecurityState.SameSiteByOriginOrReferer(const R: TRequest): boolean;
-var
-  Host, O, Ref: string;
-
-  function HostFromURLLower(const U: string): string;
-  var
-    P, SStart: SizeInt;
-    Rest: string;
-  begin
-    Result := '';
-    // very small parser: scheme://host[:port]/...
-    P := Pos('://', U);
-    if P <= 0 then Exit('');
-    SStart := P + 3;
-    Rest := Copy(U, SStart, MaxInt);
-    // trim path
-    P := Pos('/', Rest);
-    if P > 0 then Rest := Copy(Rest, 1, P-1);
-    Rest := LowerCase(Trim(Rest));
-    // strip port (but keep ipv6 bracket form)
-    if (Rest <> '') and (Rest[1] = '[') then
-    begin
-      P := Pos(']', Rest);
-      if P > 0 then Exit(Copy(Rest, 2, P-2));
-    end;
-    P := LastDelimiter(':', Rest);
-    if (P > 0) and (Pos(':', Copy(Rest, 1, P-1)) = 0) then
-      Rest := Copy(Rest, 1, P-1);
-    Result := Rest;
-  end;
-
-begin
-  Host := GetHostLower(R);
-  if Host = '' then Exit(False);
-
-  O := Trim(R.Header.GetValue('Origin'));
-  if O <> '' then
-    Exit(HostFromURLLower(O) = Host);
-
-  Ref := Trim(R.Header.GetValue('Referer'));
-  if Ref <> '' then
-    Exit(HostFromURLLower(Ref) = Host);
-
-  // If neither Origin nor Referer present:
-  // For browsers, unsafe cross-site requests usually include at least Origin.
-  // But not always. We'll treat as failure if enforcing.
-  Result := False;
-end;
-
-function TSecurityState.NewRandomTokenHex(LenBytes: integer): string;
+// Constant-time comparison to prevent timing attacks
+function TSecurityState.ConstantTimeEquals(const A, B: string): boolean;
 var
   I: integer;
-  B: byte;
+  Diff: byte;
+  LA, LB: integer;
+begin
+  LA := Length(A);
+  LB := Length(B);
+
+  // Length check is not constant time, but essential for logic
+  if LA <> LB then Exit(False);
+
+  Diff := 0;
+  for I := 1 to LA do
+    Diff := Diff or (byte(A[I]) xor byte(B[I]));
+  Result := Diff = 0;
+end;
+
+class function TSecurityState.NewRandomTokenHex(LenBytes: integer): string;
+var
+  Buf: TBytes;
+  I: Integer;
+  B: Byte;
+{$IFDEF MSWINDOWS}
+  HProv: HCRYPTPROV;
+{$ENDIF}
+{$IFDEF UNIX}
+  FD: cint;
+  R: ssize_t;
+{$ENDIF}
 begin
   Result := '';
   if LenBytes <= 0 then Exit;
-  // NOTE: Random() is not cryptographically secure.
-  // For serious use, replace with OS CSPRNG.
-  for I := 1 to LenBytes do
-  begin
-    B := byte(Random(256));
-    Result := Result + IntToHex(B, 2);
+
+  SetLength(Buf, LenBytes);
+
+  {$IFDEF MSWINDOWS}
+  // Use Windows CSPRNG via CryptoAPI
+  HProv := 0;
+  if not CryptAcquireContext(HProv, nil, nil, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT) then
+    RaiseLastOSError;
+  try
+    if not CryptGenRandom(HProv, DWORD(LenBytes), @Buf[0]) then
+      RaiseLastOSError;
+  finally
+    CryptReleaseContext(HProv, 0);
   end;
+  {$ELSEIF defined(UNIX)}
+  // Use OS CSPRNG via /dev/urandom
+  FD := fpOpen('/dev/urandom', O_RDONLY);
+  if FD < 0 then
+    raise Exception.Create('Cannot open /dev/urandom');
+  try
+    R := fpRead(FD, Buf[0], LenBytes);
+    if R <> LenBytes then
+      raise Exception.Create('Short read from /dev/urandom');
+  finally
+    fpClose(FD);
+  end;
+  {$ELSE}
+  raise Exception.Create('No secure RNG implementation for this platform');
+  {$ENDIF}
+
+  SetLength(Result, LenBytes * 2);
+  for I := 0 to LenBytes - 1 do
+  begin
+    B := Buf[I];
+    Result[(I * 2) + 1] := IntToHex(B, 2)[1];
+    Result[(I * 2) + 2] := IntToHex(B, 2)[2];
+  end;
+end;
+
+// Validates Sec-Fetch-Site header if present (Fiber-style logic)
+function TSecurityState.ValidateSecFetchSite(const R: TRequest): boolean;
+var
+  SFS: string;
+begin
+  if not Cfg.CSRFAcceptSecFetchSite then Exit(True);
+
+  SFS := GetHeaderLower(R, 'Sec-Fetch-Site');
+
+  // If header missing, pass (fallback to Origin check)
+  if SFS = '' then Exit(True);
+
+  // Allowed values: same-origin, same-site, none
+  if (SFS = 'same-origin') or (SFS = 'same-site') or (SFS = 'none') then
+    Exit(True);
+
+  // 'cross-site' or unknown values -> Reject
+  Exit(False);
+end;
+
+// Helper to parse origin URL and check trust
+function TSecurityState.CheckOriginReferer(const R: TRequest): boolean;
+
+  // Minimal URL parser for Origin/Referer (scheme://host[:port])
+  procedure ParseURLHost(const U: string; out Scheme, Host: string);
+  var
+    P, Start: SizeInt;
+    Tmp: string;
+  begin
+    Scheme := '';
+    Host := '';
+    Tmp := Trim(U);
+    if Tmp = '' then Exit;
+
+    // Scheme
+    P := Pos('://', Tmp);
+    if P > 0 then
+    begin
+      Scheme := LowerCase(Copy(Tmp, 1, P-1));
+      Start := P + 3;
+    end
+    else
+    begin
+      Scheme := 'http'; // Default assumption? Or fail? Origin usually has scheme.
+      Start := 1;
+    end;
+
+    // 2. Host (and port)
+    Tmp := Copy(Tmp, Start, MaxInt);
+    // Strip path
+    P := Pos('/', Tmp);
+    if P > 0 then Tmp := Copy(Tmp, 1, P-1);
+
+    // Handle IPv6 [::1]
+    if (Length(Tmp) > 0) and (Tmp[1] = '[') then
+    begin
+      P := Pos(']', Tmp);
+      if P > 0 then Host := Copy(Tmp, 2, P-2);
+      // Ignore port inside brackets for simplicity here
+    end
+    else
+    begin
+      // Strip port
+      P := LastDelimiter(':', Tmp);
+      // Check if colon is part of IPv6 (already handled) or port separator
+      // Since we stripped brackets, a colon here is port.
+      if P > 0 then
+        Host := Copy(Tmp, 1, P-1)
+      else
+        Host := Tmp;
+    end;
+
+    Host := LowerCase(Host);
+  end;
+
+  function MatchWildcard(const Pattern, Value: string): boolean;
+  begin
+    // Pattern: *.example.com
+    if (Length(Pattern) > 1) and (Pattern[1] = '*') and (Pattern[2] = '.') then
+    begin
+      // Check if Value ends with suffix (e.g., .example.com)
+      // or Value equals suffix without dot (unlikely for domain, but still)
+      // We check strict suffix matching: value = "sub.example.com", pattern = "*.example.com" -> suffix ".example.com"
+      Exit( (Length(Value) >= Length(Pattern)-1) and
+            (Copy(Value, Length(Value) - Length(Pattern) + 2, MaxInt) = Copy(Pattern, 2, MaxInt)) );
+    end;
+    Result := (Pattern = Value);
+  end;
+
+var
+  Host, Origin, Referer: string;
+  OriginScheme, OriginHost: string;
+  RefererScheme, RefererHost: string;
+  I: integer;
+  TrustedPattern: string;
+  TmpScheme, TmpHost: string;
+begin
+  Host := GetHostLower(R);
+  if Host = '' then Exit(False); // Should not happen
+
+  // Check Origin Header
+  Origin := R.Header.GetValue('Origin');
+
+  // Handle "null" origin (file://, data://, sandbox)
+  if LowerCase(Trim(Origin)) = 'null' then
+  begin
+    // Treat as missing
+    Origin := '';
+  end;
+
+  if Origin <> '' then
+  begin
+    ParseURLHost(Origin, OriginScheme, OriginHost);
+
+    // Check strict match with Host
+    if OriginHost = Host then Exit(True);
+
+    // Check Trusted Origins
+    for I := 0 to High(Cfg.CSRFTrustedOrigins) do
+    begin
+      TrustedPattern := Trim(Cfg.CSRFTrustedOrigins[I]);
+      if TrustedPattern = '' then Continue;
+
+      ParseURLHost(TrustedPattern, TmpScheme, TmpHost);
+
+      // Must match scheme
+      if (TmpScheme <> '') and (TmpScheme <> OriginScheme) then Continue;
+
+      // Match host (wildcard supported)
+      if MatchWildcard(TmpHost, OriginHost) then Exit(True);
+    end;
+
+    // Origin present but not trusted
+    Exit(False);
+  end;
+
+  // Check Referer Header (Fallback)
+  // "If Origin is missing: if TLS, require Referer; if not TLS, allow (Fiber logic)"
+  if R.TLS then
+  begin
+    Referer := R.Header.GetValue('Referer');
+    if Referer = '' then Exit(False);
+
+    ParseURLHost(Referer, RefererScheme, RefererHost);
+
+    // Must match Host
+    if RefererHost = Host then Exit(True);
+
+    // Check Trusted Origins
+    for I := 0 to High(Cfg.CSRFTrustedOrigins) do
+    begin
+      TrustedPattern := Trim(Cfg.CSRFTrustedOrigins[I]);
+      if TrustedPattern = '' then Continue;
+
+      ParseURLHost(TrustedPattern, TmpScheme, TmpHost);
+      if (TmpScheme <> '') and (TmpScheme <> RefererScheme) then Continue;
+
+      if MatchWildcard(TmpHost, RefererHost) then Exit(True);
+    end;
+
+    Exit(False);
+  end;
+
+  // Not TLS and no Origin -> Allow (Fiber logic for legacy support)
+  Result := True;
 end;
 
 procedure TSecurityState.EnsureCSRFCookie(W: TResponseWriter; R: TRequest);
 var
   Tok: string;
   Secure: boolean;
+  HttpOnly: boolean;
 begin
   if not Cfg.EnableCSRF then Exit;
   if Cfg.CSRFCookieName = '' then Exit;
@@ -429,9 +614,22 @@ begin
   if Tok = '' then
   begin
     Tok := NewRandomTokenHex(Cfg.CSRFTokenLength);
-    // Secure cookie: set on TLS (or forced)
+
+    // Determine Secure flag
     Secure := Cfg.CSRFSecureCookie and R.TLS;
-    W.SetCookie(Cfg.CSRFCookieName, Tok, '/', '', 0, -1, Secure, True, Cfg.CSRFSameSite);
+
+    // SameSite=None requires Secure
+    if (Cfg.CSRFSameSite = TResponseWriter.TCookieSameSite.ssNone) and (not Secure) then
+      Secure := True; // Force Secure, though it won't work over HTTP in browsers
+
+    // Determine HttpOnly flag
+    HttpOnly := Cfg.CSRFCookieHTTPOnly;
+
+    // Note: If HttpOnly=True, JS cannot read the token for double-submit.
+    // For double-submit pattern, usually HttpOnly=False or token is provided via API/Body.
+    // User must configure this correctly.
+
+    W.SetCookie(Cfg.CSRFCookieName, Tok, '/', '', 0, -1, Secure, HttpOnly, Cfg.CSRFSameSite);
   end;
 end;
 
@@ -446,26 +644,34 @@ begin
   Need := MethodInList(R.Method, Cfg.RequireCSRFForMethods);
   if not Need then
   begin
-    // Still can issue cookie for clients
+    // Ensure cookie exists for safe methods (GET) so client has it for later
     EnsureCSRFCookie(W, R);
     Exit(True);
   end;
 
-  // Optional origin enforcement for unsafe methods
+  // Sec-Fetch-Site check (Modern browsers)
+  if not ValidateSecFetchSite(R) then
+  begin
+    WriteError(W, 403, 'CSRF check failed (Sec-Fetch-Site)');
+    Exit(False);
+  end;
+
+  // Origin/Referer Check
   if Cfg.EnforceOriginForUnsafe then
   begin
-    if not SameSiteByOriginOrReferer(R) then
+    if not CheckOriginReferer(R) then
     begin
-      WriteError(W, 403, 'CSRF check failed');
+      WriteError(W, 403, 'CSRF check failed (Origin/Referer)');
       Exit(False);
     end;
   end;
 
-  // Double-submit cookie: Cookie must equal header
+  // Double-Submit Cookie Check
   CookieTok := R.CookieValue(Cfg.CSRFCookieName);
   HeaderTok := R.Header.GetValue(Cfg.CSRFHeaderName);
 
-  if (CookieTok = '') or (HeaderTok = '') or (CookieTok <> HeaderTok) then
+  // Use Constant-time comparison
+  if (CookieTok = '') or (HeaderTok = '') or (not ConstantTimeEquals(CookieTok, HeaderTok)) then
   begin
     WriteError(W, 403, 'CSRF token missing or invalid');
     Exit(False);
@@ -478,7 +684,7 @@ function TSecurityState.CheckInputBasics(W: TResponseWriter; R: TRequest): boole
 var
   I: integer;
   V: string;
-  Q,F: TStringList;
+  Q, F: TStringList;
 begin
   Result := True;
   if not Cfg.EnableInputChecks then Exit(True);
@@ -513,6 +719,9 @@ begin
       WriteError(W, 400, 'Bad request');
       Exit(False);
     end;
+
+    Q := nil;
+    F := nil;
     try
       R.ParseQuery(Q);
       for I := 0 to Q.Count - 1 do
@@ -539,29 +748,9 @@ end;
 function TSecurityState.CheckRateLimit(W: TResponseWriter; R: TRequest): boolean;
 var
   Key: string;
-  Idx: integer;
   B: TTokenBucket;
   vNowMs: int64;
   Elapsed: double;
-  S: string;
-
-  function ParseBucket(const Raw: string; out BB: TTokenBucket): boolean;
-  var
-    Parts: TStringArray;
-  begin
-    FillChar(BB, SizeOf(BB), 0);
-    Parts := Raw.Split(['|']);
-    if Length(Parts) <> 2 then Exit(False);
-    BB.Tokens := StrToFloatDef(Parts[0], 0);
-    BB.LastTS := StrToInt64Def(Parts[1], 0);
-    Result := True;
-  end;
-
-  function PackBucket(const BB: TTokenBucket): string;
-  begin
-    Result := FloatToStr(BB.Tokens) + '|' + IntToStr(BB.LastTS);
-  end;
-
 begin
   Result := True;
   if not Cfg.EnableRateLimit then Exit(True);
@@ -572,23 +761,15 @@ begin
 
   Lock.Enter;
   try
-    Idx := Rate.IndexOfName(Key);
-    if Idx < 0 then
+    if not Rate.Get(Key, B) then
     begin
       B.Tokens := Cfg.RateLimitBurst;
       B.LastTS := vNowMs;
-      Rate.Values[Key] := PackBucket(B);
+      Rate.Insert(Key, B);
       Exit(True);
     end;
 
-    S := Rate.ValueFromIndex[Idx];
-    if not ParseBucket(S, B) then
-    begin
-      B.Tokens := Cfg.RateLimitBurst;
-      B.LastTS := vNowMs;
-    end;
-
-    Elapsed := (NowMs - B.LastTS) / 1000.0;
+    Elapsed := (vNowMs - B.LastTS) / 1000.0;
     if Elapsed < 0 then Elapsed := 0;
 
     B.Tokens := Min(Cfg.RateLimitBurst, B.Tokens + Elapsed * Cfg.RateLimitRPS);
@@ -596,7 +777,7 @@ begin
 
     if B.Tokens < 1.0 then
     begin
-      Rate.ValueFromIndex[Idx] := PackBucket(B);
+      Rate.Insert(Key, B); // overwrite
       // Optional: Retry-After
       if not W.HeadersSent then
         W.Header.SetValue('Retry-After', '1');
@@ -605,7 +786,7 @@ begin
     end;
 
     B.Tokens := B.Tokens - 1.0;
-    Rate.ValueFromIndex[Idx] := PackBucket(B);
+    Rate.Insert(Key, B); // overwrite
   finally
     Lock.Leave;
   end;
@@ -645,8 +826,7 @@ begin
   Result := Trim(R.QueryValue(K));
   if Result <> '' then Exit;
 
-  // Best-effort JSON extraction (only if body looks like JSON object)
-  // Avoid heavy parsing for huge bodies
+  // Best-effort JSON extraction
   CT := LowerCase(R.Header.GetValue('Content-Type'));
   if Pos('application/json', CT) <= 0 then Exit('');
 
@@ -670,11 +850,8 @@ end;
 function TSecurityState.CheckBruteForcePre(W: TResponseWriter; R: TRequest): boolean;
 var
   Key, IP, Ident: string;
-  Idx: integer;
-  vNowMs: int64;
-  Raw: string;
-  Parts: TStringArray;
   A: TAttemptWindow;
+  vNowMs: int64;
 begin
   Result := True;
   if not Cfg.EnableBruteForce then Exit(True);
@@ -692,28 +869,17 @@ begin
 
   Lock.Enter;
   try
-    Idx := Brute.IndexOfName(Key);
-    FillChar(A, SizeOf(A), 0);
-
-    if Idx >= 0 then
+    if not Brute.Get(Key, A) then
     begin
-      Raw := Brute.ValueFromIndex[Idx];
-      Parts := Raw.Split(['|']);
-      if Length(Parts) = 3 then
-      begin
-        A.Count := StrToIntDef(Parts[0], 0);
-        A.WindowStartMS := StrToInt64Def(Parts[1], vNowMs);
-        A.BlockUntilMS := StrToInt64Def(Parts[2], 0);
-      end;
-    end
-    else
-    begin
+      FillChar(A, SizeOf(A), 0);
       A.Count := 0;
       A.WindowStartMS := vNowMs;
       A.BlockUntilMS := 0;
+      Brute.Insert(Key, A);
+      Exit(True);
     end;
 
-    if (A.BlockUntilMS > 0) and (NowMs < A.BlockUntilMS) then
+    if (A.BlockUntilMS > 0) and (vNowMs < A.BlockUntilMS) then
     begin
       if not W.HeadersSent then
         W.Header.SetValue('Retry-After', IntToStr((A.BlockUntilMS - vNowMs) div 1000));
@@ -725,15 +891,11 @@ begin
     if (Cfg.BruteWindowSeconds > 0) and (vNowMs - A.WindowStartMS > int64(Cfg.BruteWindowSeconds) * 1000) then
     begin
       A.Count := 0;
-      A.WindowStartMS := NowMs;
+      A.WindowStartMS := vNowMs;
       A.BlockUntilMS := 0;
     end;
 
-    // Save back (pre state)
-    if Idx < 0 then
-      Brute.Values[Key] := IntToStr(A.Count) + '|' + IntToStr(A.WindowStartMS) + '|' + IntToStr(A.BlockUntilMS)
-    else
-      Brute.ValueFromIndex[Idx] := IntToStr(A.Count) + '|' + IntToStr(A.WindowStartMS) + '|' + IntToStr(A.BlockUntilMS);
+    Brute.Insert(Key, A); // overwrite refreshed state
   finally
     Lock.Leave;
   end;
@@ -742,26 +904,14 @@ end;
 procedure TSecurityState.ObserveBruteForceResult(R: TRequest; StatusCode: integer);
 var
   Key, IP, Ident: string;
-  Idx: integer;
-  vNowMs: int64;
-  Raw: string;
-  Parts: TStringArray;
   A: TAttemptWindow;
-
-  procedure Save;
-  begin
-    if Idx < 0 then
-      Brute.Values[Key] := IntToStr(A.Count) + '|' + IntToStr(A.WindowStartMS) + '|' + IntToStr(A.BlockUntilMS)
-    else
-      Brute.ValueFromIndex[Idx] := IntToStr(A.Count) + '|' + IntToStr(A.WindowStartMS) + '|' + IntToStr(A.BlockUntilMS);
-  end;
-
+  vNowMs: int64;
 begin
   if not Cfg.EnableBruteForce then Exit;
   if not IsLoginPath(R.Path) then Exit;
   if not SameText(R.Method, 'POST') then Exit;
 
-  // Count only failures (401/403) and maybe 400 (bad creds vs bad request - depends)
+  // Count only failures (401/403)
   if not ((StatusCode = 401) or (StatusCode = 403)) then Exit;
 
   IP := ClientIP(R);
@@ -775,32 +925,19 @@ begin
 
   Lock.Enter;
   try
-    Idx := Brute.IndexOfName(Key);
-    FillChar(A, SizeOf(A), 0);
-
-    if Idx >= 0 then
+    if not Brute.Get(Key, A) then
     begin
-      Raw := Brute.ValueFromIndex[Idx];
-      Parts := Raw.Split(['|']);
-      if Length(Parts) = 3 then
-      begin
-        A.Count := StrToIntDef(Parts[0], 0);
-        A.WindowStartMS := StrToInt64Def(Parts[1], vNowMs);
-        A.BlockUntilMS := StrToInt64Def(Parts[2], 0);
-      end;
-    end
-    else
-    begin
+      FillChar(A, SizeOf(A), 0);
       A.Count := 0;
       A.WindowStartMS := vNowMs;
       A.BlockUntilMS := 0;
     end;
 
     // Window reset
-    if (Cfg.BruteWindowSeconds > 0) and (NowMs - A.WindowStartMS > int64(Cfg.BruteWindowSeconds) * 1000) then
+    if (Cfg.BruteWindowSeconds > 0) and (vNowMs - A.WindowStartMS > int64(Cfg.BruteWindowSeconds) * 1000) then
     begin
       A.Count := 0;
-      A.WindowStartMS := NowMs;
+      A.WindowStartMS := vNowMs;
       A.BlockUntilMS := 0;
     end;
 
@@ -814,7 +951,7 @@ begin
         A.BlockUntilMS := vNowMs + 60*1000;
     end;
 
-    Save;
+    Brute.Insert(Key, A); // overwrite
   finally
     Lock.Leave;
   end;
@@ -824,7 +961,7 @@ function AdvancedSecurityMiddleware(const Cfg: TSecurityConfig): TMiddleware;
 var
   State: TSecurityState;
 begin
-  Randomize;
+  // Randomize removed - using OS CSPRNG
   State := TSecurityState.Create(Cfg);
 
   Result := function(Next: THandlerFunc): THandlerFunc
@@ -850,7 +987,6 @@ begin
       if not State.CheckCSRF(W, R) then Exit;
 
       // Observe result for brute-force after handler runs
-      // Use OnBeforeFinish hook to read final status.
       W.OnBeforeFinish := procedure(WW: TResponseWriter; RR: TRequest)
       begin
         State.ObserveBruteForceResult(RR, WW.StatusCode);
@@ -865,7 +1001,7 @@ function AdvancedSecurityRouterMiddleware(const Cfg: TSecurityConfig): TRouterMi
 var
   State: TSecurityState;
 begin
-  Randomize;
+  // Randomize removed
   State := TSecurityState.Create(Cfg);
 
   Result := procedure(C: TObject)
@@ -880,24 +1016,28 @@ begin
       Exit;
     end;
 
+    // Rate limit first (cheap)
     if not State.CheckRateLimit(Ctx.W, Ctx.R) then
     begin
       Ctx.Abort;
       Exit;
     end;
 
+    // Input checks
     if not State.CheckInputBasics(Ctx.W, Ctx.R) then
     begin
       Ctx.Abort;
       Exit;
     end;
 
+    // Brute-force gate (pre)
     if not State.CheckBruteForcePre(Ctx.W, Ctx.R) then
     begin
       Ctx.Abort;
       Exit;
     end;
 
+    // CSRF (unsafe methods)
     if not State.CheckCSRF(Ctx.W, Ctx.R) then
     begin
       Ctx.Abort;
