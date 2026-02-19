@@ -143,7 +143,7 @@ begin
     Rec.Free;
     S.Free;
   end;
-end.;
+end;
 ```
 
 Using logging middleware:
@@ -185,6 +185,96 @@ begin
   end;
 end;
 
+```
+
+Using SessionManager + AuthMiddleware with server without router:
+
+```pascal
+var
+  Srv: THTTPServer;
+
+type
+  TMyData = record
+    User: string;
+    AbsExpUTC: TDateTime; 
+  end;
+
+var
+  SessMgr: specialize TSessionManager<TMyData>;
+  GetSess: specialize TSessionManager<TMyData>.TGetSessionFunc;
+
+function RequireLogin(const Next: THandlerFunc): THandlerFunc;
+begin
+  Result := procedure(W: TResponseWriter; R: TRequest)
+  var
+    Sess: specialize TSessionManager<TMyData>.TSessionObj;
+  begin
+    Sess := GetSess(W, R);
+    if Sess.Data.User = '' then
+    begin
+      W.Header.SetValue('Location', '/login');
+      W.WriteHeader(302);
+      Exit;
+    end;
+    Next(W, R);
+  end;
+end;
+
+begin
+  Srv := THTTPServer.Create;
+
+  SessMgr := specialize TSessionManager<TMyData>.Create(SessionConfigDefault);
+  Srv.Use( function(Next: THandlerFunc): THandlerFunc
+           begin
+             Result := SessMgr.Middleware(Next, GetSess);
+           end);
+
+  Srv.Use(@RequireLogin);
+
+  Srv.HandleFunc('/private', procedure(W: TResponseWriter; R: TRequest)
+  var
+    S: specialize TSessionManager<TMyData>.TSessionObj;
+  begin
+    S := GetSess(W, R);
+    W.WriteHeader(200);
+    W.Write('hello ' + S.Data.User);
+  end);
+
+  Srv.ListenAndServe('0.0.0.0:8080');
+end;
+```
+Using AuthMiddleware with router:
+
+```pascal
+var
+  Srv: THTTPServer;
+  Router: THTTPRouter;
+  Cfg: TBasicAuthConfig;
+
+begin
+  Srv := THTTPServer.Create;
+  Router := THTTPRouter.Create(Srv);
+
+  Cfg := DefaultBasicAuthConfig;
+  Cfg.Realm := 'Admin';
+  Cfg.Users := TStringList.Create;
+  Cfg.Users.Values['admin'] := 'secret';
+  Router.Use(BasicAuth(Cfg));
+
+  Router.GET('/admin', [
+    procedure(C: TObject)
+    var Ctx: THTTPRouterContext;
+        U: string;
+    begin
+      Ctx := THTTPRouterContext(C);
+      U := Ctx.R.Context.GetValue('BasicAuthUsername');
+      Ctx.Text(200, 'hi ' + U);
+    end
+  ]);
+
+  Router.Mount;
+  Srv.ListenAndServe('0.0.0.0:8080');
+end;
 ```
 Using Security middleware:
 
