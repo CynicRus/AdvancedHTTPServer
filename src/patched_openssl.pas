@@ -615,6 +615,10 @@ type
       end;
     PPPKCS7_ISSUER_AND_SERIAL = ^PPKCS7_ISSUER_AND_SERIAL;
 
+    PSTACK_OF_X509_NAME = ^STACK_OF_X509_NAME;
+    STACK_OF_X509_NAME = record
+    end;
+
 const
   SSL_ERROR_NONE = 0;
   SSL_ERROR_SSL = 1;
@@ -1158,6 +1162,7 @@ var
   function SslGetVersion(ssl: PSSL):AnsiString;
   function SslGetPeerCertificate(ssl: PSSL):PX509;
   procedure SslCtxSetVerify(ctx: PSSL_CTX; mode: cInt; arg2: TSSLCTXVerifyCallback);
+  procedure SslCtxSetVerifyDepth(ctx: PSSL_CTX; depth: cInt);
   function SSLGetCurrentCipher(s: PSSL):SslPtr;
   function SSLCipherGetName(c: SslPtr): AnsiString;
   function SSLCipherGetBits(c: SslPtr; var alg_bits: cInt):cInt;
@@ -1693,6 +1698,7 @@ type
   TSslGetVersion = function(ssl: PSSL):PAnsiChar; cdecl;
   TSslGetPeerCertificate = function(ssl: PSSL):PX509; cdecl;
   TSslCtxSetVerify = procedure(ctx: PSSL_CTX; mode: cInt; arg2: SslPtr); cdecl;
+  TSslCtxSetVerifyDepth = procedure(ctx: PSSL_CTX; depth: cInt); cdecl;
   TSSLGetCurrentCipher = function(s: PSSL):SslPtr; cdecl;
   TSSLCipherGetName = function(c: Sslptr):PAnsiChar; cdecl;
   TSSLCipherGetBits = function(c: SslPtr; alg_bits: PcInt):cInt; cdecl;
@@ -1972,6 +1978,7 @@ var
   _SslGetVersion: TSslGetVersion = nil;
   _SslGetPeerCertificate: TSslGetPeerCertificate = nil;
   _SslCtxSetVerify: TSslCtxSetVerify = nil;
+  _SslCtxSetVerifyDepth: TSslCtxSetVerifyDepth = nil;
   _SSLGetCurrentCipher: TSSLGetCurrentCipher = nil;
   _SSLCipherGetName: TSSLCipherGetName = nil;
   _SSLCipherGetBits: TSSLCipherGetBits = nil;
@@ -2553,6 +2560,12 @@ begin
     Result := _SslCtxUseCertificateASN1(ctx, len, SslPtr(Buf))
   else
     Result := 0;
+end;
+
+procedure SslCtxSetVerifyDepth(ctx: PSSL_CTX; depth: cInt);
+begin
+  if InitSSLInterface and Assigned(_SslCtxSetVerifyDepth) then
+    _SslCtxSetVerifyDepth(ctx, depth);
 end;
 
 function SslCtxUseCertificateFile(ctx: PSSL_CTX; const _file: AnsiString; _type: cInt):cInt;
@@ -5384,6 +5397,7 @@ begin
   then _SslGetPeerCertificate := GetProcAddr(SSLLibHandle, 'SSL_get1_peer_certificate');
   _SslGetVersion := GetProcAddr(SSLLibHandle, 'SSL_get_version');
   _SslCtxSetVerify := GetProcAddr(SSLLibHandle, 'SSL_CTX_set_verify');
+  _SslCtxSetVerifyDepth := GetProcAddr(SSLLibHandle, 'SSL_CTX_set_verify_depth');
   _SslGetCurrentCipher := GetProcAddr(SSLLibHandle, 'SSL_get_current_cipher');
   _SslCipherGetName := GetProcAddr(SSLLibHandle, 'SSL_CIPHER_get_name');
   _SslCipherGetBits := GetProcAddr(SSLLibHandle, 'SSL_CIPHER_get_bits');
@@ -5772,6 +5786,7 @@ begin
   _SslGetPeerCertificate := nil;
   _SslGetVersion := nil;
   _SslCtxSetVerify := nil;
+  _SslCtxSetVerifyDepth := nil;
   _SslGetCurrentCipher := nil;
   _SslCipherGetName := nil;
   _SslCipherGetBits := nil;
