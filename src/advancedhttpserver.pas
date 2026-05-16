@@ -252,6 +252,12 @@ type
     Trailer: TTrailer;
     RemoteAddr: string;
     TLS: boolean;
+    // mTLS info
+    ClientCertPresented: boolean;
+    ClientCertVerified: boolean;
+    ClientCertSubject: string;
+    ClientCertIssuer: string;
+
     TransferEncoding: array of string;
     ContentLength: int64;
     Context: TContext;
@@ -382,6 +388,11 @@ type
     Enabled: boolean;
     CertFile: string;
     KeyFile: string;
+    // === mTLS ===
+    ClientCAFile: string;        // CA file/bundle for client cert verification
+    ClientCAPath: string;        // optional CA directory
+    RequireClientCert: boolean;  // hard require client certificate
+    VerifyDepth: integer;        // optional chain depth, 0 = OpenSSL default
   end;
 
   { TConnectionState }
@@ -443,6 +454,12 @@ type
     ReadBIO: PBIO;
     WriteBIO: PBIO;
     HandshakeDone: boolean;
+
+    // mTLS client certificate info (per connection, because handshake happens before first request)
+    ClientCertPresented: boolean;
+    ClientCertVerified: boolean;
+    ClientCertSubject: string;
+    ClientCertIssuer: string;
 
     {$IFDEF LINUX}
     EpollFd: Integer;        // epoll instance обслуживающего воркера
@@ -596,8 +613,8 @@ type
       out RedirectTo: string): boolean;
     function FindHandlerOrRedirect(const Path: string; out Handler: THandlerFunc;
       out RedirectTo: string): boolean;
-    procedure ParseRequestLine(const Head: ansistring; const ClientAddr: string;
-      UseTLS: boolean; out R: TRequest);
+    procedure ParseRequestLine(const Head: ansistring;
+      Conn: PClientConnection; out R: TRequest);
     function TryExtractRequest(var InBuf: ansistring; out Head, Body: ansistring;
       out NeedMoreData: boolean): boolean;
     function ReadChunkedBody(Conn: PClientConnection): boolean;
@@ -634,6 +651,9 @@ type
     procedure Use(Middleware: TMiddleware);
     procedure ListenAndServe(const Addr: string);
     procedure ListenAndServeTLS(const Addr: string; const CertFile, KeyFile: string);
+    procedure ListenAndServeMTLS(
+      const Addr, CertFile, KeyFile, ClientCAFile, ClientCAPath: string;
+      RequireClientCert: boolean = True);
     procedure Shutdown;
     function ActiveConnections: integer;
     property ConnectionTimeout: integer read FConnectionTimeout write FConnectionTimeout;
@@ -1246,6 +1266,59 @@ begin
     Result := Conn = 'keep-alive';
 end;
 
+function X509NameToString(AName: PX509_NAME): string;
+var
+  Buf: ansistring;
+begin
+  Result := '';
+  if AName = nil then Exit;
+  X509NameOneline(AName, Buf, 1024);
+  if Buf <> '' then
+    Result := buf;
+end;
+
+function VerifyPeerCertificate(SSL: PSSL; RequireClientCert: boolean;
+  out CertPresented: boolean; out CertVerified: boolean;
+  out Subject, Issuer: string): boolean;
+var
+  Peer: PX509;
+  VerifyRes: integer;
+begin
+  Result := False;
+  CertPresented := False;
+  CertVerified := False;
+  Subject := '';
+  Issuer := '';
+
+  if SSL = nil then Exit(False);
+
+  Peer := SSLGetPeerCertificate(SSL);
+  try
+    if Peer <> nil then
+    begin
+      CertPresented := True;
+      Subject := X509NameToString(X509GetSubjectName(Peer));
+      Issuer := X509NameToString(X509GetIssuerName(Peer));
+    end;
+
+    if RequireClientCert and (not CertPresented) then
+      Exit(False);
+
+    VerifyRes := SSLGetVerifyResult(SSL);
+
+    if CertPresented and (VerifyRes = X509_V_OK) then
+      CertVerified := True;
+
+    if RequireClientCert then
+      Result := CertPresented and CertVerified
+    else
+      Result := (not CertPresented) or CertVerified;
+  finally
+    if Peer <> nil then
+      X509Free(Peer);
+  end;
+end;
+
 function ParseAddress(const Addr: string; out Host: string; out Port: word): boolean;
 
   function StrToWordDef(const S: string; Default: word): word;
@@ -1641,6 +1714,10 @@ begin
   Trailer := TTrailer.Create;
   Context := TContext.Create;
   TLS := False;
+  ClientCertPresented := False;
+  ClientCertVerified := False;
+  ClientCertSubject := '';
+  ClientCertIssuer := '';
   ContentLength := -1;
   SetLength(TransferEncoding, 0);
   SetLength(BodyBytes, 0);
@@ -2925,6 +3002,9 @@ begin
 end;
 
 function THTTPServer.InitSSL: boolean;
+var
+  VerifyMode: integer;
+  CAList: PSTACK_OF_X509_NAME;
 begin
   Result := False;
 
@@ -2934,6 +3014,12 @@ begin
     SSLLibraryInit;
     OpenSSLaddallalgorithms;
     SSLInitialized := True;
+  end;
+
+  if Assigned(FSSLCtx) then
+  begin
+    SSLCTXfree(FSSLCtx);
+    FSSLCtx := nil;
   end;
 
   FSSLCtx := SSLCTXnew(SslTLSMethod);
@@ -2947,6 +3033,7 @@ begin
     SSL_FILETYPE_PEM) <= 0 then
   begin
     WriteLn('Failed to load certificate: ', FTLSConfig.CertFile);
+    LogSSLError('SslCtxUseCertificateFile');
     Exit;
   end;
 
@@ -2954,14 +3041,49 @@ begin
     SSL_FILETYPE_PEM) <= 0 then
   begin
     WriteLn('Failed to load private key: ', FTLSConfig.KeyFile);
+    LogSSLError('SslCtxUsePrivateKeyFile');
     Exit;
   end;
 
   if SslCtxCheckPrivateKeyFile(FSSLCtx) <= 0 then
   begin
     WriteLn('Private key does not match certificate');
+    LogSSLError('SslCtxCheckPrivateKeyFile');
     Exit;
   end;
+
+  // ===== mTLS verify store =====
+  if (FTLSConfig.ClientCAFile <> '') or (FTLSConfig.ClientCAPath <> '') then
+  begin
+    if SSLCTXLoadVerifyLocations(
+      FSSLCtx, pansichar(ansistring(FTLSConfig.ClientCAFile)),
+      pansichar(ansistring(FTLSConfig.ClientCAPath))) <= 0 then
+    begin
+      WriteLn('Failed to load client CA locations. File="', FTLSConfig.ClientCAFile,
+        '" Path="', FTLSConfig.ClientCAPath, '"');
+      LogSSLError('SSL_CTX_load_verify_locations');
+      Exit;
+    end;
+
+    if FTLSConfig.ClientCAFile <> '' then
+    begin
+      CAList := SSLLoadClientCAFile(pansichar(ansistring(FTLSConfig.ClientCAFile)));
+      if CAList <> nil then
+        SSLCTXSetClientCAList(FSSLCtx, CAList);
+    end;
+  end;
+
+  VerifyMode := SSL_VERIFY_NONE;
+
+  if FTLSConfig.RequireClientCert then
+    VerifyMode := SSL_VERIFY_PEER or SSL_VERIFY_FAIL_IF_NO_PEER_CERT
+  else if (FTLSConfig.ClientCAFile <> '') or (FTLSConfig.ClientCAPath <> '') then
+    VerifyMode := SSL_VERIFY_PEER;
+
+  SSLCTXSetVerify(FSSLCtx, VerifyMode, nil);
+
+  if FTLSConfig.VerifyDepth > 0 then
+    SSLCTXSetVerifyDepth(FSSLCtx, FTLSConfig.VerifyDepth);
 
   {$IFDEF ENABLE_HTTP2}
   SSL_CTX_set_alpn_select_cb(FSSLCtx, @ALPNSelectCallback, Self);
@@ -3065,19 +3187,51 @@ var
   ReadLen: Integer;
   Chunk: AnsiString;
   PendingInSSL: Integer;
+  CertPresented, CertVerified: Boolean;
+  CertSubject, CertIssuer: string;
 begin
   if not Conn^.UseTLS then Exit;
 
-  // ===  Handshake  ===
+  // === Handshake ===
   if not Conn^.HandshakeDone then
   begin
     Ret := SSLAccept(Conn^.SSL);
     if Ret > 0 then
     begin
+      // Explicit post-handshake peer verification for mTLS
+      if not VerifyPeerCertificate(
+        Conn^.SSL,
+        FTLSConfig.RequireClientCert,
+        CertPresented,
+        CertVerified,
+        CertSubject,
+        CertIssuer
+      ) then
+      begin
+        WriteLn('mTLS verification failed for ', Conn^.Addr,
+          ' presented=', CertPresented, ' verified=', CertVerified);
+        CloseConnection(Conn);
+        Exit;
+      end;
+
       Conn^.HandshakeDone := True;
       Conn^.State := csReadingHeaders;
       Conn^.LastActivity := Now;
       Conn^.LastStateChange := Now;
+
+      Conn^.ClientCertPresented := CertPresented;
+      Conn^.ClientCertVerified  := CertVerified;
+      Conn^.ClientCertSubject   := CertSubject;
+      Conn^.ClientCertIssuer    := CertIssuer;
+
+      // Если запрос уже создан (редкий случай) — тоже обновляем
+      if Assigned(Conn^.CurrentRequest) then
+      begin
+        Conn^.CurrentRequest.ClientCertPresented := CertPresented;
+        Conn^.CurrentRequest.ClientCertVerified  := CertVerified;
+        Conn^.CurrentRequest.ClientCertSubject   := CertSubject;
+        Conn^.CurrentRequest.ClientCertIssuer    := CertIssuer;
+      end;
 
       {$IFDEF ENABLE_HTTP2}
       var const_proto: PByte;
@@ -3098,7 +3252,7 @@ begin
       Err := SSLGetError(Conn^.SSL, Ret);
       case Err of
         SSL_ERROR_WANT_READ, SSL_ERROR_WANT_WRITE:
-          ; // Normal, wait for more IO events
+          ; // normal nonblocking handshake state
         else
         begin
           LogSSLError('SSL_accept');
@@ -3108,14 +3262,13 @@ begin
       end;
     end;
 
-    // Flush any data generated by handshake (e.g. ServerHello)
     FlushWriteBIOToOutBuf(Conn);
 
-    // If handshake still pending, exit and wait for next EPOLLIN/EPOLLOUT
-    if not Conn^.HandshakeDone then Exit;
+    if not Conn^.HandshakeDone then
+      Exit;
   end;
 
-  // Loop to read all available decrypted data from SSL object
+  // === Read decrypted application data ===
   repeat
     PendingInSSL := SSLPending(Conn^.SSL);
     if PendingInSSL > 0 then
@@ -3128,6 +3281,7 @@ begin
       SetString(Chunk, PAnsiChar(@Buf[0]), ReadLen);
       Conn^.PlainInBuf := Conn^.PlainInBuf + Chunk;
       Conn^.LastActivity := Now;
+      TouchNet(Conn);
     end
     else
       Break;
@@ -3138,7 +3292,7 @@ begin
     Err := SSLGetError(Conn^.SSL, ReadLen);
     case Err of
       SSL_ERROR_WANT_READ, SSL_ERROR_WANT_WRITE:
-        ; // Need more network IO
+        ;
       SSL_ERROR_ZERO_RETURN:
         begin
           CloseConnection(Conn);
@@ -3146,7 +3300,7 @@ begin
         end;
       else
       begin
-        if Err <> SSL_ERROR_SYSCALL then // syscall 0 often means clean shutdown with empty read
+        if Err <> SSL_ERROR_SYSCALL then
           LogSSLError('SSL_read');
         CloseConnection(Conn);
         Exit;
@@ -3154,7 +3308,6 @@ begin
     end;
   end;
 
-  // === 3. Process HTTP Data ===
   if Length(Conn^.PlainInBuf) > 0 then
     ProcessRequestsFromBuffer(Conn);
 end;
@@ -3218,21 +3371,51 @@ var
   Chunk: AnsiString;
   PendingInSSL: Integer;
   HandshakeAdvanced: Boolean;
+  CertPresented, CertVerified: Boolean;
+  CertSubject, CertIssuer: string;
 begin
   if not Conn^.UseTLS then Exit;
 
   HandshakeAdvanced := False;
 
-  // === Handshake (if still not done) ===
+  // === Handshake ===
   if not Conn^.HandshakeDone then
   begin
     Ret := SSLAccept(Conn^.SSL);
     if Ret > 0 then
     begin
+      if not VerifyPeerCertificate(
+        Conn^.SSL,
+        FTLSConfig.RequireClientCert,
+        CertPresented,
+        CertVerified,
+        CertSubject,
+        CertIssuer
+      ) then
+      begin
+        WriteLn('mTLS verification failed for ', Conn^.Addr,
+          ' presented=', CertPresented, ' verified=', CertVerified);
+        CloseConnection(Conn);
+        Exit;
+      end;
+
       Conn^.HandshakeDone := True;
       Conn^.State := csReadingHeaders;
       Conn^.LastActivity := Now;
       Conn^.LastStateChange := Now;
+
+      Conn^.ClientCertPresented := CertPresented;
+      Conn^.ClientCertVerified  := CertVerified;
+      Conn^.ClientCertSubject   := CertSubject;
+      Conn^.ClientCertIssuer    := CertIssuer;
+
+      if Assigned(Conn^.CurrentRequest) then
+      begin
+        Conn^.CurrentRequest.ClientCertPresented := CertPresented;
+        Conn^.CurrentRequest.ClientCertVerified  := CertVerified;
+        Conn^.CurrentRequest.ClientCertSubject   := CertSubject;
+        Conn^.CurrentRequest.ClientCertIssuer    := CertIssuer;
+      end;
 
       {$IFDEF ENABLE_HTTP2}
       var const_proto: PByte;
@@ -3247,6 +3430,7 @@ begin
         end;
       end;
       {$ENDIF}
+
       HandshakeAdvanced := True;
     end
     else
@@ -3265,11 +3449,12 @@ begin
         end;
       end;
     end;
+
     FlushWriteBIO(Conn);
     Exit;
   end;
 
-  // === Reading plaintext ===
+  // === Read decrypted app data ===
   if Conn^.HandshakeDone or HandshakeAdvanced then
   begin
     repeat
@@ -3284,6 +3469,7 @@ begin
         SetString(Chunk, PAnsiChar(@Buf[0]), ReadLen);
         Conn^.PlainInBuf := Conn^.PlainInBuf + Chunk;
         Conn^.LastActivity := Now;
+        TouchNet(Conn);
       end
       else
         Break;
@@ -3483,7 +3669,7 @@ begin
   // For body-read continuation jobs, CurrentRequest already exists.
   if (Job.Head <> '') then
   begin
-    ParseRequestLine(Job.Head, Conn^.Addr, Conn^.UseTLS, Conn^.CurrentRequest);
+    ParseRequestLine(Job.Head, Conn, Conn^.CurrentRequest);
     Conn^.KeepAlive := WantsKeepAlive(Conn^.CurrentRequest);
 
     Conn^.CurrentRequest.ClearBody;
@@ -3596,7 +3782,7 @@ begin
         begin
           PendingReq := PPendingRequest(Conn^.PipelineRequests[I]);
 
-          ParseRequestLine(PendingReq^.Head, Conn^.Addr, Conn^.UseTLS,
+          ParseRequestLine(PendingReq^.Head, Conn,
             Conn^.CurrentRequest);
           Conn^.KeepAlive := WantsKeepAlive(Conn^.CurrentRequest);
 
@@ -4014,6 +4200,10 @@ begin
           Conn^.SSLHandshakeStarted := False;
           Conn^.HeaderStartTime := Now;
           Conn^.Server := Self;
+          Conn^.ClientCertPresented := False;
+          Conn^.ClientCertVerified := False;
+          Conn^.ClientCertSubject := '';
+          Conn^.ClientCertIssuer := '';
 
           {$IFDEF ENABLE_HTTP2}
           Conn^.HTTP2Session := nil;
@@ -4706,8 +4896,8 @@ begin
     T := Copy(T, 2, Length(T) - 2);
 
   // Drop :port for IPv4 form "1.2.3.4:1234" (do NOT attempt for IPv6)
-  if (Pos(':', T) > 0) and (Pos('.', T) > 0) and (Pos(':', T) =
-    LastDelimiter(':', T)) then
+  if (Pos(':', T) > 0) and (Pos('.', T) > 0) and
+    (Pos(':', T) = LastDelimiter(':', T)) then
   begin
     // looks like ipv4:port
     T := Copy(T, 1, LastDelimiter(':', T) - 1);
@@ -4933,7 +5123,7 @@ begin
 end;
 
 procedure THTTPServer.ParseRequestLine(const Head: ansistring;
-  const ClientAddr: string; UseTLS: boolean; out R: TRequest);
+  Conn: PClientConnection; out R: TRequest);
 var
   I, J: integer;
   Line, Key, Value: string;
@@ -4946,8 +5136,16 @@ begin
   if Assigned(R) then
     FreeAndNil(R);
   R := TRequest.Create;
-  R.RemoteAddr := ClientAddr; // default: socket remote
-  R.TLS := UseTLS;
+  R.RemoteAddr := Conn^.Addr; // default: socket remote
+  R.TLS := Conn^.UseTLS;
+
+  if Conn^.UseTLS then
+  begin
+    R.ClientCertPresented := Conn^.ClientCertPresented;
+    R.ClientCertVerified  := Conn^.ClientCertVerified;
+    R.ClientCertSubject   := Conn^.ClientCertSubject;
+    R.ClientCertIssuer    := Conn^.ClientCertIssuer;
+  end;
 
   Lines := TStringList.Create;
   try
@@ -4995,7 +5193,7 @@ begin
       R.ContentLength := -1;
 
     // If behind trusted proxy, override RemoteAddr from headers
-    if IsTrustedProxyRemote(ClientAddr) then
+    if IsTrustedProxyRemote(Conn^.Addr) then
     begin
       RealIP := ExtractRealIPFromHeaders(R.Header);
       if RealIP <> '' then
@@ -5682,6 +5880,10 @@ begin
           Conn^.IOContext := nil;
           Conn^.HeaderStartTime := Now;
           Conn^.Server := Self;
+          Conn^.ClientCertPresented := False;
+          Conn^.ClientCertVerified := False;
+          Conn^.ClientCertSubject := '';
+          Conn^.ClientCertIssuer := '';
 
           {$IFDEF ENABLE_HTTP2}
           Conn^.HTTP2Session := nil;
@@ -5893,6 +6095,10 @@ begin
           Conn^.WriteIOContext := nil;
           Conn^.HeaderStartTime := Now;
           Conn^.Server := Self;
+          Conn^.ClientCertPresented := False;
+          Conn^.ClientCertVerified := False;
+          Conn^.ClientCertSubject := '';
+          Conn^.ClientCertIssuer := '';
 
           {$IFDEF ENABLE_HTTP2}
           Conn^.HTTP2Session := nil;
@@ -5924,6 +6130,21 @@ begin
 
   Shutdown;
   WriteLn('Server stopped gracefully');
+end;
+
+procedure THTTPServer.ListenAndServeMTLS(
+  const Addr, CertFile, KeyFile, ClientCAFile, ClientCAPath: string;
+  RequireClientCert: boolean);
+begin
+  FTLSConfig.Enabled := True;
+  FTLSConfig.CertFile := CertFile;
+  FTLSConfig.KeyFile := KeyFile;
+  FTLSConfig.ClientCAFile := ClientCAFile;
+  FTLSConfig.ClientCAPath := ClientCAPath;
+  FTLSConfig.RequireClientCert := RequireClientCert;
+  FTLSConfig.VerifyDepth := 8;
+
+  ListenAndServeTLS(Addr, CertFile, KeyFile);
 end;
 
 end.
