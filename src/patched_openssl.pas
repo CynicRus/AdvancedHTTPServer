@@ -855,6 +855,7 @@ const
 
   SSL_VERIFY_NONE = $00;
   SSL_VERIFY_PEER = $01;
+  SSL_VERIFY_FAIL_IF_NO_PEER_CERT = $02;
 
   SSL_CERT_FLAG_TLS_STRICT                      = $00000001;
 
@@ -1143,6 +1144,8 @@ var
   procedure SslCtxSetDefaultPasswdCbUserdata(ctx: PSSL_CTX; u: SslPtr);
 //  function SslCtxLoadVerifyLocations(ctx: PSSL_CTX; const CAfile: PAnsiChar; const CApath: PAnsiChar):cInt;
   function SslCtxLoadVerifyLocations(ctx: PSSL_CTX; const CAfile: AnsiString; const CApath: AnsiString):cInt;
+  procedure SslCtxSetClientCAList(ctx: PSSL_CTX; name_list: SslPtr);
+  function SslLoadClientCAFile(const file_: AnsiString): SslPtr;
   function SslNew(ctx: PSSL_CTX):PSSL;
   procedure SslFree(ssl: PSSL);
   function SslAccept(ssl: PSSL):cInt;
@@ -1676,6 +1679,8 @@ type
   TSslCtxSetDefaultPasswdCb = procedure(ctx: PSSL_CTX; cb: SslPtr); cdecl;
   TSslCtxSetDefaultPasswdCbUserdata = procedure(ctx: PSSL_CTX; u: SslPtr); cdecl;
   TSslCtxLoadVerifyLocations = function(ctx: PSSL_CTX; const CAfile: PAnsiChar; const CApath: PAnsiChar):cInt; cdecl;
+  TSslCtxSetClientCAList = procedure(ctx: PSSL_CTX; name_list: SslPtr); cdecl;
+  TSslLoadClientCAFile = function(const file_: PAnsiChar): SslPtr; cdecl;
   TSslNew = function(ctx: PSSL_CTX):PSSL; cdecl;
   TSslFree = procedure(ssl: PSSL); cdecl;
   TSslAccept = function(ssl: PSSL):cInt; cdecl;
@@ -1953,6 +1958,8 @@ var
   _SslCtxSetDefaultPasswdCb: TSslCtxSetDefaultPasswdCb = nil;
   _SslCtxSetDefaultPasswdCbUserdata: TSslCtxSetDefaultPasswdCbUserdata = nil;
   _SslCtxLoadVerifyLocations: TSslCtxLoadVerifyLocations = nil;
+  _SslCtxSetClientCAList: TSslCtxSetClientCAList = nil;
+  _SslLoadClientCAFile: TSslLoadClientCAFile = nil;
   _SslNew: TSslNew = nil;
   _SslFree: TSslFree = nil;
   _SslAccept: TSslAccept = nil;
@@ -2590,6 +2597,20 @@ begin
     Result := _SslCtxLoadVerifyLocations(ctx, SslPtr(CAfile), SslPtr(CApath))
   else
     Result := 0;
+end;
+
+procedure SslCtxSetClientCAList(ctx: PSSL_CTX; name_list: SslPtr);
+begin
+  if InitSSLInterface and Assigned(_SslCtxSetClientCAList) then
+    _SslCtxSetClientCAList(ctx, name_list);
+end;
+
+function SslLoadClientCAFile(const file_: AnsiString): SslPtr;
+begin
+  if InitSSLInterface and Assigned(_SslLoadClientCAFile) then
+    Result := _SslLoadClientCAFile(PAnsiChar(file_))
+  else
+    Result := nil;
 end;
 
 function SslNew(ctx: PSSL_CTX):PSSL;
@@ -5347,6 +5368,8 @@ begin
   _SslCtxSetDefaultPasswdCb := GetProcAddr(SSLLibHandle, 'SSL_CTX_set_default_passwd_cb');
   _SslCtxSetDefaultPasswdCbUserdata := GetProcAddr(SSLLibHandle, 'SSL_CTX_set_default_passwd_cb_userdata');
   _SslCtxLoadVerifyLocations := GetProcAddr(SSLLibHandle, 'SSL_CTX_load_verify_locations');
+  _SslCtxSetClientCAList := GetProcAddr(SSLLibHandle, 'SSL_CTX_set_client_CA_list');
+  _SslLoadClientCAFile := GetProcAddr(SSLLibHandle, 'SSL_load_client_CA_file');
   _SslNew := GetProcAddr(SSLLibHandle, 'SSL_new');
   _SslFree := GetProcAddr(SSLLibHandle, 'SSL_free');
   _SslAccept := GetProcAddr(SSLLibHandle, 'SSL_accept');
@@ -5735,6 +5758,8 @@ begin
   _SslCtxSetDefaultPasswdCb := nil;
   _SslCtxSetDefaultPasswdCbUserdata := nil;
   _SslCtxLoadVerifyLocations := nil;
+  _SslCtxSetClientCAList := nil;
+  _SslLoadClientCAFile := nil;
   _SslNew := nil;
   _SslFree := nil;
   _SslAccept := nil;
