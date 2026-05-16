@@ -427,6 +427,138 @@ apiV1.Use(@ApiVersionMiddleware('v1'));
 apiV1.HandleFunc('/tasks', TasksV1);
 apiV1.HandleFunc('/users', UsersV1);
 ```
+### mTLS (Mutual TLS) Support
+
+**AdvancedHTTPServer** fully supports **Mutual TLS** — the server requires and validates a client certificate before processing any HTTP request.
+
+---
+
+### 1. Starting the mTLS Server
+
+Use `ListenAndServeMTLS`:
+
+```pascal
+procedure ListenAndServeMTLS(
+  const Addr: string;
+  const CertFile, KeyFile: string;           // Server certificate & key
+  const ClientCAFile: string = '';           // CA to verify client certificates
+  const ClientCAPath: string = '';           // Optional CA directory
+  RequireClientCert: Boolean = True);        // Require client cert?
+```
+
+**Example:**
+
+```pascal
+Server.ListenAndServeMTLS(
+  ':8443',
+  'certs/server.crt',      // Server cert
+  'certs/server.key',      // Server private key
+  'certs/ca.crt',          // CA that signs client certificates
+  '',                      // ClientCAPath (optional)
+  True                     // Require client certificate
+);
+```
+
+---
+
+### 2. Client Certificate Information
+
+In every request handler you have access to:
+
+```pascal
+TRequest = class
+  ClientCertPresented : Boolean;   // Was a certificate presented?
+  ClientCertVerified  : Boolean;   // Was it successfully verified?
+  ClientCertSubject   : string;    // Subject (CN=..., O=...)
+  ClientCertIssuer    : string;    // Issuer (the CA)
+end;
+```
+
+**Example usage:**
+
+```pascal
+procedure SecureHandler(W: TResponseWriter; R: TRequest);
+begin
+  if not R.ClientCertVerified then
+  begin
+    W.WriteHeader(401);
+    W.Write('Valid client certificate required');
+    Exit;
+  end;
+
+  W.Write('Hello, ' + R.ClientCertSubject);
+end;
+```
+
+---
+
+### 3. Usage Examples
+
+#### Without Router (direct handlers)
+
+```pascal
+Server.HandleFunc('/api/private', @SecureHandler);
+Server.HandleFunc('/api/public',  @PublicHandler);   // mTLS still applies globally
+```
+
+#### With Router
+
+```pascal
+Router.GET('/secure', @SecureHandler);
+Server.Use(Router.Middleware);
+
+Server.ListenAndServeMTLS(':8443', 'server.crt', 'server.key', 'ca.crt', '', True);
+```
+
+> **Note:** mTLS is enabled at the server level and applies to all routes.
+
+---
+
+### 4. Complete Minimal Example
+
+```pascal
+program MTLSServer;
+
+uses
+  SysUtils, AdvancedHTTPServer, AdvancedHTTPRouter;
+
+procedure SecureHandler(W: TResponseWriter; R: TRequest);
+begin
+  if not R.ClientCertVerified then
+  begin
+    W.WriteHeader(401);
+    W.Write('Access denied');
+    Exit;
+  end;
+
+  W.Write('Welcome, ' + R.ClientCertSubject);
+end;
+
+var
+  Server: THTTPServer;
+  Router: THTTPRouter;
+begin
+  Server := THTTPServer.Create;
+  Router := THTTPRouter.Create;
+  try
+    Router.GET('/secure', @SecureHandler);
+    Server.Use(Router.Middleware);
+
+    Server.ListenAndServeMTLS(':8443',
+      'certs/server.crt',
+      'certs/server.key',
+      'certs/ca.crt',   // CA for client certs
+      '',
+      True);            // Require client certificate
+
+    WriteLn('mTLS server running on https://localhost:8443');
+    ReadLn;
+  finally
+    Router.Free;
+    Server.Free;
+  end;
+end.
+```
 
 ### Feature matrix (2026) 
 
