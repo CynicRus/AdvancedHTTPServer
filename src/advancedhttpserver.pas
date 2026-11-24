@@ -616,7 +616,7 @@ type
     procedure ParseRequestLine(const Head: ansistring;
       Conn: PClientConnection; out R: TRequest);
     function TryExtractRequest(var InBuf: ansistring; out Head, Body: ansistring;
-      out NeedMoreData: boolean): boolean;
+      out NeedMoreData: boolean; out AChunked: boolean): boolean;
     function ReadChunkedBody(Conn: PClientConnection): boolean;
     procedure ProcessRequest(Conn: PClientConnection);
     procedure SendContinueResponse(Conn: PClientConnection);
@@ -3699,6 +3699,7 @@ var
   PendingReq: PPendingRequest;
   ReceivedBodyLen: int64;
   SwitchedToReadingBody: boolean;
+  ExtractedChunked: boolean;
   {$IFDEF ENABLE_HTTP2}
   H2Ret: cint;
   DataPtr: PByte;
@@ -3768,12 +3769,16 @@ begin
   case Conn^.State of
     csReadingHeaders:
     begin
-      while TryExtractRequest(Conn^.PlainInBuf, Head, Body, NeedMoreData) do
+      while TryExtractRequest(Conn^.PlainInBuf, Head, Body, NeedMoreData, ExtractedChunked) do
       begin
         New(PendingReq);
         PendingReq^.Head := Head;
         PendingReq^.Body := Body;
         Conn^.PipelineRequests.Add(PendingReq);
+        // the chunks of its body follow in the buffer, and they end in CRLF CRLF too:
+        // read them before looking for the next request
+        if ExtractedChunked then
+          Break;
       end;
 
       if Conn^.PipelineRequests.Count > 0 then
@@ -5206,7 +5211,7 @@ begin
 end;
 
 function THTTPServer.TryExtractRequest(var InBuf: ansistring;
-  out Head, Body: ansistring; out NeedMoreData: boolean): boolean;
+  out Head, Body: ansistring; out NeedMoreData: boolean; out AChunked: boolean): boolean;
 var
   P: SizeInt;
   HeadRaw: ansistring;
@@ -5222,6 +5227,7 @@ begin
   Head := '';
   Body := '';
   NeedMoreData := False;
+  AChunked := False;
 
   // find end of headers
   P := Pos(#13#10#13#10, InBuf);
@@ -5276,6 +5282,7 @@ begin
     Head := HeadRaw;
     Body := '';
     Delete(InBuf, 1, P + 3);
+    AChunked := True;
     Result := True;
     Exit;
   end;
