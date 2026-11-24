@@ -1380,8 +1380,16 @@ function SockAddrStorageToStr(const SS: sockaddr_storage): string;
 const
   NI_MAXHOST = 1025;
   NI_MAXSERV = 32;
+  {$IFDEF LINUX}
+  // glibc values: there $02 is NI_NUMERICSERV and $08 is NI_NAMEREQD, so the
+  // Windows values made getnameinfo resolve the client's host name
+  NI_NUMERICHOST = $01;
+  NI_NUMERICSERV = $02;
+  {$ELSE}
+  // Windows, FreeBSD and macOS
   NI_NUMERICHOST = $02;
   NI_NUMERICSERV = $08;
+  {$ENDIF}
 var
   HostBuf: array[0..NI_MAXHOST - 1] of ansichar;
   ServBuf: array[0..NI_MAXSERV - 1] of ansichar;
