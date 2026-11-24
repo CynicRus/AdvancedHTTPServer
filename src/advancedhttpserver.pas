@@ -427,6 +427,8 @@ type
     UseTLS: boolean;
     Addr: string;
     State: TConnectionState;
+    // claimed by the first CloseConnection, under FConnectionsLock
+    Closing: boolean;
     // Unified buffer for plaintext application data (HTTP)
     PlainInBuf: ansistring;
     OutBuf: ansistring;
@@ -4180,6 +4182,7 @@ begin
           ClientAddrStr := SockAddrStorageToStr(ClientSS);
 
           New(Conn);
+          Conn^.Closing := False;
           Conn^.Sock := ClientSock;
           Conn^.Addr := ClientAddrStr;
           Conn^.PlainInBuf := '';
@@ -4234,8 +4237,14 @@ begin
           Conn^.EpollFd := FEpollFd;
           Conn^.EpollEvents := EPOLLIN;
 
-          FConnections.Add(Conn);
-          IncConnections;
+          // several IO threads accept at once: the list is shared
+          FConnectionsLock.Enter;
+          try
+            FConnections.Add(Conn);
+            Inc(FActiveConnections);
+          finally
+            FConnectionsLock.Leave;
+          end;
           AddToEpoll(ClientSock, Conn);
         until False;
       end
@@ -4418,6 +4427,7 @@ begin
           ClientAddrStr := SockAddrStorageToStr(ClientSS);
 
           New(Conn);
+          Conn^.Closing := False;
           Conn^.Sock := ClientSock;
           Conn^.Addr := ClientAddrStr;
           Conn^.PlainInBuf := '';
@@ -5530,7 +5540,17 @@ var
   StreamData: PHTTP2StreamData;
   {$ENDIF}
 begin
-  if Conn^.State = csClosed then Exit;
+  { several IO loops run CheckConnectionTimeouts over the shared list, and the client
+    may close at the same moment: only the first caller closes; the others leave
+    without touching the record, which may already be freed }
+  FConnectionsLock.Enter;
+  try
+    if (FConnections.IndexOf(Conn) < 0) or Conn^.Closing then
+      Exit;
+    Conn^.Closing := True;
+  finally
+    FConnectionsLock.Leave;
+  end;
 
   {$IFDEF LINUX}
   // Removed from epoll in the thread that manages it, but we check state here.
@@ -5856,6 +5876,7 @@ begin
           ClientAddrStr := SockAddrStorageToStr(ClientSS);
 
           New(Conn);
+          Conn^.Closing := False;
           Conn^.Sock := ClientSock;
           Conn^.SSL := nil;
           Conn^.UseTLS := False;
@@ -5892,8 +5913,14 @@ begin
           Conn^.HTTP2Streams := nil;
           {$ENDIF}
 
-          FConnections.Add(Conn);
-          IncConnections;
+          // several IO threads accept at once: the list is shared
+          FConnectionsLock.Enter;
+          try
+            FConnections.Add(Conn);
+            Inc(FActiveConnections);
+          finally
+            FConnectionsLock.Leave;
+          end;
           SysSetNonBlocking(ClientSock, True);
           AssociateWithIOCP(TSocket(ClientSock), Conn);
           PostRead(Conn);
@@ -6048,6 +6075,7 @@ begin
           ClientAddrStr := SockAddrStorageToStr(ClientSS);
 
           New(Conn);
+          Conn^.Closing := False;
           Conn^.Sock := ClientSock;
           Conn^.SSL := SSLNew(FSSLCtx);
           if Conn^.SSL = nil then
@@ -6107,8 +6135,14 @@ begin
           Conn^.HTTP2Streams := nil;
           {$ENDIF}
 
-          FConnections.Add(Conn);
-          IncConnections;
+          // several IO threads accept at once: the list is shared
+          FConnectionsLock.Enter;
+          try
+            FConnections.Add(Conn);
+            Inc(FActiveConnections);
+          finally
+            FConnectionsLock.Leave;
+          end;
           SysSetNonBlocking(ClientSock, True);
           AssociateWithIOCP(TSocket(ClientSock), Conn);
           PostRead(Conn);
