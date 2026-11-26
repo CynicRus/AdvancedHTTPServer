@@ -148,7 +148,7 @@ type
   {$ENDIF}
 
   {$IFDEF WINDOWS}
-  TIOOperation = (ioRead, ioWrite, ioAccept);
+  TIOOperation = (ioRead, ioWrite, ioAccept, ioResume);
 
   PIOContext = ^TIOContext;
   TIOContext = record
@@ -641,6 +641,7 @@ type
     procedure InitIOCP;
     procedure AssociateWithIOCP(Sock: TSocket; Conn: PClientConnection);
     procedure PostRead(Conn: PClientConnection);
+    procedure PostResume(Conn: PClientConnection);
     procedure RunIOCPLoop;
     {$ENDIF}
   public
@@ -4546,6 +4547,20 @@ begin
   end;
 end;
 
+procedure THTTPServer.PostResume(Conn: PClientConnection);
+var
+  IOCtx: PIOContext;
+begin
+  // a completion packet of our own: the IOCP thread, the one that owns the input
+  // buffer, processes what is already there
+  New(IOCtx);
+  FillChar(IOCtx^.Overlapped, SizeOf(TOverlapped), 0);
+  IOCtx^.Operation := ioResume;
+  IOCtx^.Connection := Conn;
+  if not PostQueuedCompletionStatus(FIOCPHandle, 0, ULONG_PTR(Conn), @IOCtx^.Overlapped) then
+    Dispose(IOCtx);
+end;
+
 procedure THTTPServer.RunIOCPLoop;
 var
   BytesTransferred: DWORD;
@@ -4555,6 +4570,7 @@ var
   Conn: PClientConnection;
   Chunk: ansistring;
   LastTimeoutCheck: TDateTime;
+  Alive: boolean;
 begin
   LastTimeoutCheck := Now;
 
@@ -4618,6 +4634,19 @@ begin
 
           Dispose(IOCtx);
           PostRead(Conn);
+        end;
+
+        ioResume:
+        begin
+          Dispose(IOCtx);
+          FConnectionsLock.Enter;
+          try
+            Alive := (FConnections.IndexOf(Conn) >= 0) and (Conn^.State = csReadingHeaders);
+          finally
+            FConnectionsLock.Leave;
+          end;
+          if Alive and (Length(Conn^.PlainInBuf) > 0) then
+            ProcessRequestsFromBuffer(Conn);
         end;
 
         ioWrite:
@@ -5519,6 +5548,12 @@ begin
   {$IFDEF LINUX}
   if (Length(Conn^.PlainInBuf) > 0) and Conn^.KeepAlive then
     HandleEpollRead(Conn);
+  {$ENDIF}
+  {$IFDEF WINDOWS}
+  // the next request may have arrived while this one ran (state csProcessing): it
+  // sits in PlainInBuf and no read completion will come for it
+  if (Length(Conn^.PlainInBuf) > 0) and Conn^.KeepAlive then
+    PostResume(Conn);
   {$ENDIF}
 end;
 
